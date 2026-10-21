@@ -485,6 +485,123 @@ test('renderer.stats() равен оценке кадра целиком', async
 })
 
 /**
+ * Кадр не пересобирается, пока не изменился НАБОР ассетов.
+ *
+ * Это не оптимизация «на потом», а условие следующего этапа. Весь проект
+ * существует ради одного числа — `gap95` ≤ 40 мс при позах ≥ 10 Гц, — и по
+ * нему решается развилка «3D или 2.5D». Вывод, который шестьдесят раз в
+ * секунду создаёт новые `InstancedMesh`, новые инстанс-буферы и новые VAO,
+ * дал бы замер сборщика мусора, а не трёхмерного вывода, и развилка
+ * решилась бы по причине, которой в замысле нет.
+ *
+ * Прошла бы вхолостую? НЕТ, и это проверено мутацией: верни безусловную
+ * пересборку каждого кадра — и первая половина падает (объекты другие).
+ * Вторая половина не даёт «переиспользовать» превратиться в «не заметить
+ * смену кадра»: при другом наборе ассетов граф ОБЯЗАН пересобраться, и
+ * счёт обязан стать другим.
+ */
+test('два кадра с одним набором ассетов идут по одним и тем же мешам', async () => {
+  const { renderer } = await makeTestRenderer()
+  const first = sceneWith([
+    { asset: 'decor/kelp', z: 5 },
+    { asset: 'decor/kelp', z: 9 },
+    { asset: 'obstacle/jelly', z: 7 },
+  ])
+  renderer.draw(first)
+  const meshesOf = () => {
+    const out: THREE.InstancedMesh[] = []
+    renderer.root().traverse((o: any) => {
+      if (o.isMesh) out.push(o)
+    })
+    return out
+  }
+  const before = meshesOf()
+  const uuidsBefore = before.map((m: any) => m.uuid)
+  expect(before.length).toBeGreaterThan(1)
+
+  /* Тот же набор, другие координаты — ровно то, что происходит каждый кадр:
+     коридор едет, состав кадра не меняется. */
+  const moved = sceneWith([
+    { asset: 'decor/kelp', z: 4.5 },
+    { asset: 'decor/kelp', z: 8.5 },
+    { asset: 'obstacle/jelly', z: 6.5 },
+  ])
+  renderer.draw(moved)
+  const after = meshesOf()
+  expect(after.map((m: any) => m.uuid)).toEqual(uuidsBefore)
+  for (let i = 0; i < after.length; i++) expect(after[i]).toBe(before[i])
+
+  // Но координаты переложены, а не остались от прошлого кадра.
+  const m = new THREE.Matrix4()
+  const pos = new THREE.Vector3()
+  const kelp = after.find((x) => x.name === 'decor/kelp')!
+  kelp.getMatrixAt(0, m)
+  m.decompose(pos, new THREE.Quaternion(), new THREE.Vector3())
+  expect(pos.z).toBeCloseTo(4.5, 6)
+
+  /* ТЕ ЖЕ ассеты, но ДРУГОЕ их число — случай, на котором «переиспользуем»
+     опаснее всего: ёмкость `InstancedMesh` задана при создании, и подправить
+     у него `count` вместо пересборки значит читать за краем буфера. Найдено
+     мутацией: без этой половины проверка проходила у `refill3D`, который
+     число размещений не сверяет. */
+  const denser = sceneWith([
+    { asset: 'decor/kelp', z: 4 },
+    { asset: 'decor/kelp', z: 8 },
+    { asset: 'decor/kelp', z: 12 },
+    { asset: 'obstacle/jelly', z: 6 },
+  ])
+  renderer.draw(denser)
+  const dense = meshesOf()
+  expect(dense.map((x: any) => x.uuid)).not.toEqual(uuidsBefore)
+  const denseKelp = dense.find((x) => x.name === 'decor/kelp')!
+  expect(denseKelp.count).toBe(3)
+  expect(renderer.stats()).toEqual({
+    calls: estimateFrame(denser, table).calls,
+    verts: estimateFrame(denser, table).verts,
+  })
+
+  /* А смена набора пересобирает: иначе «переиспользуем» значило бы
+     «рисуем прошлый кадр». */
+  const other = sceneWith([{ asset: 'decor/kelp', z: 3 }, { asset: 'star/ring', z: 6 }])
+  renderer.draw(other)
+  const rebuilt = meshesOf()
+  expect(rebuilt.map((x: any) => x.uuid)).not.toEqual(uuidsBefore)
+  expect(renderer.stats()).toEqual({
+    calls: estimateFrame(other, table).calls,
+    verts: estimateFrame(other, table).verts,
+  })
+  renderer.dispose()
+})
+
+/**
+ * Смена ЗОНЫ пересобирает постоянную часть: небо у каждой зоны своё, и
+ * оставить прошлое значило бы ехать по новой зоне под старым небом.
+ *
+ * Прошла бы вхолостую? НЕТ: сравниваются живой счёт и оценка КАДРА, а у
+ * разных зон небо — разный ассет с разным числом вершин.
+ */
+test('смена зоны меняет небо, а не оставляет прошлое', async () => {
+  const { renderer } = await makeTestRenderer()
+  const here = sceneWith([{ asset: 'decor/kelp' }])
+  renderer.draw(here)
+  const sky = () => {
+    const names: string[] = []
+    renderer.root().traverse((o: any) => {
+      if (o.isMesh && o.name.startsWith('sky/')) names.push(o.name)
+    })
+    return names
+  }
+  expect(sky()).toEqual(['sky/greenHill'])
+
+  const there = { ...here, zone: 'nebula' }
+  renderer.draw(there)
+  expect(sky()).toEqual(['sky/nebula'])
+  const whole = estimateFrame(there, table)
+  expect(renderer.stats()).toEqual({ calls: whole.calls, verts: whole.verts })
+  renderer.dispose()
+})
+
+/**
  * Внутреннее разрешение 0.7 и очистка за собой.
  *
  * Прошла бы вхолостую? НЕТ: ожидание записано ЛИТЕРАЛОМ (2 × 0.7), а не
@@ -535,9 +652,12 @@ test('потеря контекста пересобирает вывод', asyn
   expect(lost.defaultPrevented).toBe(true)
   expect(renderer.stats().calls).toBeGreaterThan(0)
 
-  /* Пока контекста нет, рисовать нельзя, а помнить — нужно. */
+  /* Пока контекста нет, рисовать нельзя, а помнить — нужно. Кадр взят
+     ДРУГОЙ (тело ушло вбок): так видно, что после восстановления рисуется
+     последний кадр, а не позапрошлый. */
   const rendersAfterLoss = gl.calls.renders
-  renderer.draw(scene)
+  const moved = { ...scene, camera: { u: 1, pitch: 0 } }
+  renderer.draw(moved)
   expect(gl.calls.renders).toBe(rendersAfterLoss)
 
   canvas.emit('webglcontextrestored')
@@ -551,6 +671,11 @@ test('потеря контекста пересобирает вывод', asyn
   // Вернулся контекст — вернулась и картинка, а не чёрный экран до
   // следующего вызова `draw`.
   expect(gl.calls.renders).toBe(rendersAfterLoss + 1)
+  /* И камера стоит там, где её оставил ПОСЛЕДНИЙ кадр, а не предпоследний:
+     первый кадр после восстановления рисуется явной установкой камеры, а не
+     тем, что в ней случайно осталось. Найдено мутацией — без этой строки
+     пропажа `placeCamera` из обработчика проходила молча. */
+  expect(renderer.camera().position.x).toBeCloseTo(cameraX(1), 9)
 
   // И за собой вывод убирает: после `dispose` подписок не остаётся.
   renderer.dispose()

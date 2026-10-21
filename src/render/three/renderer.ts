@@ -17,7 +17,14 @@ import { VIEW } from '../../core/config.js'
 import { CROUCH_PITCH_GAIN, DRAW_FAR_M } from '../types'
 import type { FrameScene } from '../types'
 import { cameraX } from '../numbers'
-import { build3D, buildBackdrop, forgetMaterials, stats3D } from './build'
+import {
+  backdropPlacements,
+  build3D,
+  buildBackdrop,
+  forgetMaterials,
+  refill3D,
+  stats3D,
+} from './build'
 import type { LoadedAssets } from './build'
 import manifest from '../../../assets/manifest.json'
 
@@ -49,18 +56,25 @@ export interface ThreeRenderer extends Renderer {
 /**
  * Внутреннее разрешение: рисуем в 0.7 от плотности экрана.
  *
- * ЧИСЛО ЗАПИСАНО ЗДЕСЬ, и это его единственный владелец. Оговорка, важная
- * для честности: в спеке (`docs/superpowers/specs/2026-10-21-architecture.md`)
- * этого числа НЕТ — оно названо в плане и в брифе этапа как «из спеки», но в
- * тексте спеки отсутствует. Причина у него при этом есть, и она чужая:
- * `VIEW.width`/`VIEW.height` старого вывода фиксируют буфер 1280×720 и
- * игнорируют DPR, потому что «Miracast всё равно пережимает в 720p, рисовать
- * выше — чистый нагрев на GPU, который уже делят распознавание и
- * кодировщик» (`src/core/config.js:377`). 0.7 — та же мысль, выраженная
- * долей, а не фиксированным буфером: телефон здесь делит кадр с инференсом
- * позы, и пиксели, которых не видно через сжатие, отнимают герцы у поз.
+ * ЧИСЛО ВЫБРАНО НАМИ И НИЧЕМ ПОКА НЕ ОБОСНОВАНО, кроме здравого смысла.
+ * Говорится это прямо, потому что первая версия этого комментария выводила
+ * 0.7 из старого вывода, и вывод был натянут: `VIEW.width`/`VIEW.height`
+ * фиксируют буфер 1280×720 и игнорируют DPR вовсе («Miracast всё равно
+ * пережимает в 720p, рисовать выше — чистый нагрев на GPU, который уже
+ * делят распознавание и кодировщик», `src/core/config.js:377`), а
+ * `min(dpr, 2) × 0.7` никакого потолка в 720p НЕ ставит: на плотном экране
+ * буфер уедет выше. Это не «та же мысль, выраженная долей» — это другая
+ * мысль, и притворяться иначе нельзя.
  *
- * Правильный способ его поменять — замер на телефоне, а не вкус.
+ * В спеке этого числа тоже нет: план и бриф этапа говорят «0.7 из спеки», но
+ * в тексте `docs/superpowers/specs/2026-10-21-architecture.md` его нет ни
+ * разу — проверено поиском.
+ *
+ * Чем оно станет: ЗАМЕРОМ. Следующий этап — спайк (`gap95` ≤ 40 мс при позах
+ * ≥ 10 Гц), и внутреннее разрешение — первая ручка, которой этот порог
+ * берут. Либо замер подтвердит долю, либо на её место встанет абсолютный
+ * потолок по числу пикселей буфера, как у старого вывода. До замера менять
+ * его по вкусу нельзя — ровно так потолки и уползают.
  */
 export const RENDER_SCALE = 0.7
 
@@ -246,6 +260,12 @@ export async function makeThreeRenderer(
   let disposed = false
   /** Контекст выгружен браузером: рисовать некуда, пока его не вернут. */
   let contextLost = false
+  /* Две группы кадра держатся по ссылке, а не ищутся в корне каждый кадр:
+     меняются они по разным поводам (небо — раз в зону, размещения — когда
+     въезжает препятствие), и переложить координаты можно только в ту, что
+     уже стоит. */
+  let backdrop: THREE.Group | null = null
+  let placements: THREE.Group | null = null
 
   /** Применяет угол обзора под текущее отношение сторон. */
   function applyFov(aspect: number): void {
@@ -266,23 +286,59 @@ export async function makeThreeRenderer(
    * переиспользуются — иначе шейдерная программа компилировалась бы заново
    * каждый кадр.
    */
-  function teardown(): void {
-    root.traverse((o) => {
+  function disposeInstances(group: THREE.Object3D): void {
+    group.traverse((o) => {
       const mesh = o as THREE.InstancedMesh & { isInstancedMesh?: boolean }
       if (mesh.isInstancedMesh) mesh.dispose()
     })
-    root.clear()
   }
 
-  /** Собирает кадр заново из последнего описания. */
+  function teardown(): void {
+    disposeInstances(root)
+    root.clear()
+    backdrop = null
+    placements = null
+  }
+
+  /**
+   * Готовит кадр к отрисовке.
+   *
+   * ГЛАВНЫЙ ПУТЬ — переложить координаты в уже собранный граф (`refill3D`),
+   * и пересобрать только если изменился САМ НАБОР ассетов в кадре. Полная
+   * пересборка шестьдесят раз в секунду создавала бы шестьдесят раз в
+   * секунду новые меши, инстанс-буферы и VAO — мусор, который сборщик
+   * придёт убирать посреди забега, и следующий этап (замер `gap95`) измерил
+   * бы его, а не трёхмерный вывод.
+   *
+   * Постоянная часть и размещения живут в двух отдельных группах, потому
+   * что меняются они по-разному: небо — раз в зону, размещения — когда
+   * въезжает новое препятствие. Общий корень у них один, потому что судятся
+   * они вместе: `renderer.stats()` сверяется с `estimateFrame`.
+   */
+  function sync(): void {
+    if (!last) return
+    if (!backdrop || !refill3D(backdrop, backdropPlacements(last), assets)) {
+      backdrop = replace(backdrop, buildBackdrop(last, assets))
+    }
+    if (!placements || !refill3D(placements, last.placements, assets)) {
+      placements = replace(placements, build3D(last, assets))
+    }
+  }
+
+  /** Меняет одну группу корня на другую, уничтожая инстанс-буферы старой. */
+  function replace(old: THREE.Group | null, made: THREE.Group): THREE.Group {
+    if (old) {
+      disposeInstances(old)
+      root.remove(old)
+    }
+    root.add(made)
+    return made
+  }
+
+  /** Пересборка с нуля: после восстановления контекста старые буферы мертвы. */
   function rebuild(): void {
     teardown()
-    if (!last) return
-    /* Постоянная часть и размещения — в одном корне, потому что судятся они
-       вместе: `renderer.stats()` сверяется с `estimateFrame`, а он считает
-       кадр целиком. */
-    root.add(buildBackdrop(last, assets))
-    root.add(build3D(last, assets))
+    sync()
   }
 
   function placeCamera(view: FrameScene['camera']): void {
@@ -318,13 +374,17 @@ export async function makeThreeRenderer(
   const onLost = (e: Event): void => {
     e.preventDefault()
     contextLost = true
-    forgetMaterials()
+    forgetMaterials(assets)
   }
 
   const onRestored = (): void => {
     contextLost = false
     rebuild()
-    if (last) gl.render(scene, camera)
+    if (!last) return
+    /* Камера ставится и здесь: первый кадр после восстановления обязан быть
+       тем же, что был до потери, а не нарисованным мимо явной установки. */
+    placeCamera(last.camera)
+    gl.render(scene, camera)
   }
 
   canvas.addEventListener('webglcontextlost', onLost)
@@ -345,7 +405,7 @@ export async function makeThreeRenderer(
          вернётся, пересобирать надо последний кадр, а не позапрошлый. */
       last = frame
       if (contextLost) return
-      rebuild()
+      sync()
       placeCamera(frame.camera)
       gl.render(scene, camera)
     },

@@ -57,12 +57,32 @@ const unlitCache = new Map<THREE.Material, THREE.MeshBasicMaterial>()
  * Выбрасывает кэш материалов, уничтожая их.
  *
  * Нужен в одном месте — при потере контекста WebGL: скомпилированные
- * программы вместе с контекстом становятся недействительными, и переиспользовать
- * материал, который помнит мёртвую программу, нельзя.
+ * программы вместе с контекстом становятся недействительными, и
+ * переиспользовать материал, который помнит мёртвую программу, нельзя.
+ *
+ * `assets` — ЧЬИ материалы забыть, и этот параметр не для удобства. Кэш
+ * модульный (ключ — сам материал ассета, то есть объект), и забыть всё
+ * означало бы уничтожить материалы ЧУЖОГО вывода: сегодня вывод один, но
+ * потеря контекста у одного не повод ронять картинку у другого. Без
+ * аргумента забывается всё — это для прогонов, которым кэш надо обнулить
+ * целиком.
  */
-export function forgetMaterials(): void {
-  for (const m of unlitCache.values()) m.dispose()
-  unlitCache.clear()
+export function forgetMaterials(assets?: LoadedAssets): void {
+  const sources = assets ? sourceMaterialsOf(assets) : null
+  for (const [src, made] of unlitCache) {
+    if (sources && !sources.has(src)) continue
+    made.dispose()
+    unlitCache.delete(src)
+  }
+}
+
+/** Все исходные материалы набора ассетов — ключи, по которым живёт кэш. */
+function sourceMaterialsOf(assets: LoadedAssets): Set<THREE.Material> {
+  const out = new Set<THREE.Material>()
+  for (const [id, proto] of Object.entries(assets)) {
+    for (const prim of primitivesOf(id, proto)) out.add(prim.material)
+  }
+  return out
 }
 
 /**
@@ -83,7 +103,7 @@ function unlit(src: THREE.Material): THREE.MeshBasicMaterial {
   const loose = src as unknown as { map?: unknown; color?: THREE.Color }
   const made = new THREE.MeshBasicMaterial({
     map: loose.map,
-    /* Туман — это и есть дымка описания (см. `applyPlacement`), поэтому
+    /* Туман — это и есть дымка описания (см. `placementMatrix`), поэтому
        материал обязан его слушать. */
     fog: true,
   })
@@ -180,6 +200,27 @@ function placementMatrix(p: Placement, local: THREE.Matrix4): THREE.Matrix4 {
   return tmpMatrix.multiplyMatrices(tmpPlaced, local)
 }
 
+/**
+ * Раскладывает размещения по инстансам УЖЕ СУЩЕСТВУЮЩЕГО меша.
+ *
+ * Отдельно от создания меша, потому что это и есть работа каждого кадра:
+ * координаты меняются шестьдесят раз в секунду, а набор мешей — нет.
+ */
+function fillInstances(mesh: THREE.InstancedMesh, prim: Primitive, list: Placement[]): void {
+  /* Цвет заводится только если он кому-то нужен: `instanceColor` — лишний
+     буфер на GPU, а у препятствий и колец `tint` не бывает вовсе. */
+  const tinted = list.some((p) => p.tint)
+  for (let i = 0; i < list.length; i++) {
+    mesh.setMatrixAt(i, placementMatrix(list[i], prim.local))
+    if (tinted) {
+      const tint = list[i].tint
+      mesh.setColorAt(i, tint ? tmpColor.set(tint) : WHITE)
+    }
+  }
+  mesh.instanceMatrix.needsUpdate = true
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+}
+
 /** Складывает размещения ОДНОГО ассета в инстанс-наборы, по одному на примитив. */
 function addInstanced(
   group: THREE.Group,
@@ -188,22 +229,10 @@ function addInstanced(
   assets: LoadedAssets,
 ): void {
   const prims = primitivesOf(id, protoOf(id, assets))
-  /* Цвет заводится только если он кому-то нужен: `instanceColor` — лишний
-     буфер на GPU, а у препятствий и колец `tint` не бывает вовсе. */
-  const tinted = list.some((p) => p.tint)
-
   for (const prim of prims) {
     const mesh = new THREE.InstancedMesh(prim.geometry, unlit(prim.material), list.length)
     mesh.name = id
-    for (let i = 0; i < list.length; i++) {
-      mesh.setMatrixAt(i, placementMatrix(list[i], prim.local))
-      if (tinted) {
-        const tint = list[i].tint
-        mesh.setColorAt(i, tint ? tmpColor.set(tint) : WHITE)
-      }
-    }
-    mesh.instanceMatrix.needsUpdate = true
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+    fillInstances(mesh, prim, list)
     group.add(mesh)
   }
 }
@@ -251,10 +280,63 @@ export function build3D(scene: FrameScene, assets: LoadedAssets): THREE.Group {
 export function buildBackdrop(scene: FrameScene, assets: LoadedAssets): THREE.Group {
   const group = new THREE.Group()
   group.name = 'backdrop'
-  for (const id of backdropAssets(scene)) {
-    addInstanced(group, id, [{ asset: id, x: 0, y: 0, z: 0 }], assets)
-  }
+  for (const p of backdropPlacements(scene)) addInstanced(group, p.asset, [p], assets)
   return group
+}
+
+/** Постоянная часть кадра как список размещений — по одному на ассет. */
+export function backdropPlacements(scene: FrameScene): Placement[] {
+  return backdropAssets(scene).map((asset) => ({ asset, x: 0, y: 0, z: 0 }))
+}
+
+/**
+ * Переложить НОВЫЕ координаты в УЖЕ СОБРАННЫЙ граф, не пересобирая его.
+ *
+ * Это главный путь кадра, и он не оптимизация «на потом». Полная пересборка
+ * шестьдесят раз в секунду — это шестьдесят раз в секунду новые
+ * `InstancedMesh`, новые инстанс-буферы и новые VAO, то есть мусор, который
+ * сборщик придёт убирать ровно посреди забега. Следующий этап — ЗАМЕР
+ * (`gap95` ≤ 40 мс при позах ≥ 10 Гц), и по нему решается развилка «3D или
+ * 2.5D»: вывод, пересобирающий сцену каждый кадр, измерил бы сборщик мусора,
+ * а не трёхмерный вывод, и развилка решилась бы по причине, которой в
+ * замысле нет.
+ *
+ * Отдаёт `false`, когда переложить нельзя — изменился САМ НАБОР: другие
+ * ассеты в кадре, другое их число или другое количество размещений у
+ * ассета. Тогда зовущий пересобирает (`build3D`), и это законно: смена
+ * набора в кадре случается не каждый кадр, а при въезде нового препятствия
+ * или смене зоны.
+ *
+ * Порядок сравнения тот же, что у сборки (`byAsset` хранит порядок первого
+ * появления), поэтому совпадение имён по позициям — не совпадение, а то же
+ * самое правило, прочитанное дважды.
+ */
+export function refill3D(
+  group: THREE.Group,
+  placements: Placement[],
+  assets: LoadedAssets,
+): boolean {
+  const groups = byAsset(placements)
+
+  /* Сначала СВЕРКА целиком и только потом запись: наполовину переложенный
+     граф — это кадр, в котором часть предметов из прошлого кадра, и
+     отличить его от правильного на глаз нельзя. */
+  let at = 0
+  const plan: Array<{ mesh: THREE.InstancedMesh; prim: Primitive; list: Placement[] }> = []
+  for (const [id, list] of groups) {
+    const prims = primitivesOf(id, protoOf(id, assets))
+    for (const prim of prims) {
+      const mesh = group.children[at] as THREE.InstancedMesh | undefined
+      at += 1
+      if (!mesh || mesh.name !== id || mesh.count !== list.length) return false
+      if (mesh.geometry !== prim.geometry) return false
+      plan.push({ mesh, prim, list })
+    }
+  }
+  if (at !== group.children.length) return false
+
+  for (const step of plan) fillInstances(step.mesh, step.prim, step.list)
+  return true
 }
 
 /**
@@ -297,7 +379,15 @@ export function stats3D(group: THREE.Object3D): { calls: number; verts: number }
 export type TextureSupport = { astc: boolean; etc2: boolean }
 
 /**
- * Где лежит текстура ассета.
+ * Где лежит текстура ассета. **ЗАГОТОВКА, которая сегодня НЕ в пути
+ * загрузки, и это надо знать, читая тесты на неё.**
+ *
+ * Настоящие текстуры приезжают ссылкой `images[].uri` ВНУТРИ `.glb`, и
+ * разрешает её `GLTFLoader` сам: ни один производственный файл эту функцию
+ * не зовёт. Значит тест на неё проверяет ФУНКЦИЮ, а не путь загрузки, и
+ * называть это «откат текстур работает» нельзя — работает правило выбора.
+ * Оживёт она вместе с KTX2, то есть после замера: тогда загрузчику
+ * понадобится спросить «сжатая или нет», и спросить он обязан в одном месте.
  *
  * Сегодня ответ всегда один — `.png`, и это не запасной путь, а ОСНОВНОЙ:
  * KTX2/Basis-сжатие отложено за замер, и в `assets/tex/` нет ни одного
