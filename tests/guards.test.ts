@@ -232,3 +232,33 @@ test('только src/render/numbers.ts может знать про стары
 
   expect(violations).toEqual([])
 })
+
+// ───────── числа, скопированные из копий логики в src/render ─────────────
+
+/**
+ * Два числа нового вывода объявлены в `src/render/types.ts` своими, но взяты
+ * из `run-game`: высота стен (`CORRIDOR_H_M`, в копии это НЕэкспортируемая
+ * `const WALL = 2.6`) и выверенный на ребёнке множитель приседа
+ * (`CROUCH_PITCH_GAIN`, в копии — `VIEW.pitchGain`).
+ *
+ * Своими они стали осознанно: `WALL` наружу не отдаётся вовсе, а `pitchGain`
+ * в старом выводе значит ДРУГОЕ — он масштабирует высоту глаз
+ * (`view.js:125`), а не наклон. Но «владелец теперь здесь» не значит «пусть
+ * расходятся молча»: `tools/sync-logic.mjs` однажды привезёт копию с другими
+ * числами, и узнать об этом нужно в тот же день, а не на телевизоре.
+ *
+ * Проверка нарочно дешёвая: текст копии и значение из неё же. Соседний клон
+ * `run-game` и доступ в CI ей не нужны.
+ */
+test('числа, продублированные в src/render, ещё совпадают с копиями логики', async () => {
+  const view = readFileSync(join(ROOT, 'src/core/view.js'), 'utf8')
+  const types = readFileSync(join(ROOT, 'src/render/types.ts'), 'utf8')
+
+  // Высота стен: в копии — литерал, наружу не экспортируется.
+  expect(view).toMatch(/^const WALL = 2\.6;/m)
+  expect(types).toMatch(/^export const CORRIDOR_H_M = 2\.6$/m)
+
+  const { VIEW } = await import('../src/core/config.js')
+  expect(VIEW.pitchGain).toBe(0.55)
+  expect(types).toMatch(/^export const CROUCH_PITCH_GAIN = 0\.55$/m)
+})

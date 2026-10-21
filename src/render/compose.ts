@@ -8,6 +8,7 @@
  */
 import { OBSTACLES, VIEW } from '../core/config.js'
 import { tuneFor } from '../core/difficulty.js'
+import { THEME } from '../core/theme.js'
 import { obstacleEdge } from './numbers'
 import { CORRIDOR_H_M, CROUCH_PITCH_GAIN, DRAW_FAR_M } from './types'
 import type { Decor, FrameScene, Obstacle, Placement, RunState, Star } from './types'
@@ -19,7 +20,12 @@ import type { Decor, FrameScene, Obstacle, Placement, RunState, Star } from './t
  */
 const HALF_M = VIEW.corridorWidth / 2
 
-/** Высота щели под верхним препятствием (`OBSTACLES.duckHeight`). */
+/**
+ * Щель под верхним препятствием. Берётся у `OBSTACLES`, а не записывается
+ * здесь: ниже этой высоты присед считается засчитанным, и разъехаться с
+ * приговором картинке нельзя — ребёнок присел бы под полотном, которое
+ * нарисовано ниже, чем судят.
+ */
 const DUCK_H_M = OBSTACLES.duckHeight
 
 /**
@@ -64,7 +70,19 @@ function depthOf(at: number, elapsed: number, speed: number): number {
   return (at - elapsed) * speed
 }
 
-/** Попадает ли глубина в кадр: за спиной не рисуем, за горизонтом тоже. */
+/**
+ * Попадает ли глубина в кадр.
+ *
+ * Дальняя граница — `DRAW_FAR_M`, ближняя — ноль: уехавшее за спину
+ * проецируется с отрицательной глубиной и растягивается на весь экран
+ * (разбор — у `obstacleDepth`, `view.js:2526`).
+ *
+ * Старый вывод резал ближе — с `NEAR = 0.7` для обочины (`view.js:866`) и с
+ * `drawNear()` для препятствий. Здесь этого НЕТ намеренно: ближний порог
+ * Canvas2D лечил вырожденную проекцию его собственной камеры, а у нового
+ * вывода камера своя и ещё не выбрана. Понадобится — приедет с замером, а
+ * не по привычке.
+ */
 function visible(z: number): boolean {
   return z >= 0 && z <= DRAW_FAR_M
 }
@@ -88,18 +106,26 @@ function placeObstacle(ob: Obstacle, elapsed: number, speed: number): Placement 
       x: 0,
       y: DUCK_H_M + (CORRIDOR_H_M - DUCK_H_M) / 2,
       z,
-      scale: CORRIDOR_H_M - DUCK_H_M,
+      size: {
+        w: VIEW.corridorWidth,
+        h: CORRIDOR_H_M - DUCK_H_M,
+        d: OBSTACLES.thickness,
+      },
       fade: fadeAt(z),
     }
   }
 
   /* Боковая плита стоит от стены до кромки проёма, значит её середина —
-     ровно посередине между ними, а знак берётся у стороны. */
+     ровно посередине между ними, а знак берётся у стороны. Ширина — остаток
+     полукоридора, и она МЕНЯЕТСЯ СО СЛОЖНОСТЬЮ вместе с `edge`: по этой же
+     кромке судит `isSafe`, так что нарисованное и засчитанное обязаны быть
+     одним числом. */
   return {
     asset: `obstacle/${ob.look}`,
     x: ob.side * ((HALF_M + edge) / 2),
     y: 0,
     z,
+    size: { w: HALF_M - edge, h: CORRIDOR_H_M, d: OBSTACLES.thickness },
     fade: fadeAt(z),
   }
 }
@@ -118,6 +144,44 @@ function placeStar(s: Star, elapsed: number, speed: number): Placement | null {
   }
 }
 
+/**
+ * Каким ключом палитры красится вид обочины.
+ *
+ * Таблица живёт ЗДЕСЬ, в единственном экземпляре, и это прямое следствие
+ * того, что `tint` несёт готовый цвет: иначе разбирать `THEME[zone]` пришлось
+ * бы каждому способу вывода отдельно, а две копии одной таблицы — ровно та
+ * протечка, от которой заведено «одно описание, два вывода».
+ *
+ * Умолчание — ключ, одноимённый виду: так в `drawDecor` и сделано для
+ * одиннадцати видов из шестнадцати. Исключения перечислены ниже.
+ *
+ * ЦЕНА, и она принимается осознанно: старый Canvas2D-вывод красил вид
+ * НЕСКОЛЬКИМИ цветами — у пальмы ствол `palmTrunk` и крона `palmLeaf`, у
+ * столба тело `post` и метка `postMark`, у цветка стебель `grassDark` и
+ * венчик `flower`. Здесь берётся ОДИН, главный, и второстепенный цвет
+ * теряется. Это не недосмотр: Miracast режет цветность сильнее светлоты, и
+ * тонкая двухцветная деталь на 55 дюймах через сжатие всё равно не доживает
+ * (CLAUDE.md, «Miracast сжимает картинку»). Понадобится второй цвет — он
+ * приедет вторым полем размещения, а не разбором палитры в каждом выводе.
+ */
+const DECOR_TINT_KEY: Record<string, string> = {
+  // Крона больше ствола и первой говорит «пальма».
+  palm: 'palmLeaf',
+  // У куста своего ключа нет вовсе: он красится листвой.
+  bush: 'palmLeaf',
+}
+
+/* Приведение, а не типизация `theme.js`: копии логики живут под `allowJs` и
+   типов не несут, а править их здесь запрещено. Зона и ключ приходят строками
+   из тех же копий, поэтому неизвестная пара даёт `undefined` — размещение без
+   цвета, а не падение кадра. */
+const PALETTES = THEME as unknown as Record<string, Record<string, string> | undefined>
+
+/** Цвет элемента обочины: палитра ЕГО зоны, ключ — по его виду. */
+function decorTint(d: Decor): string | undefined {
+  return PALETTES[d.zone]?.[DECOR_TINT_KEY[d.kind] ?? d.kind]
+}
+
 function placeDecor(d: Decor, elapsed: number, speed: number): Placement | null {
   const z = depthOf(d.at, elapsed, speed)
   if (z < 0 || z > DECOR_FAR_M) return null
@@ -129,11 +193,11 @@ function placeDecor(d: Decor, elapsed: number, speed: number): Placement | null 
     x: d.x,
     y: d.y,
     z,
-    scale: d.h,
-    /* Зона хранится у САМОГО элемента, а не берётся у кадра: иначе на
-       границе зон обочина следующей зоны видна в цветах предыдущей (разбор —
-       у `makeDecor`, `view.js:2480`). */
-    tint: d.zone,
+    size: { h: d.h },
+    /* Зона берётся у САМОГО элемента, а не у кадра: иначе на границе зон
+       обочина следующей зоны видна в цветах предыдущей (разбор — у
+       `makeDecor`, `view.js:2480`). */
+    tint: decorTint(d),
     fade: fadeAt(z),
   }
 }
