@@ -8,7 +8,7 @@
  */
 import { OBSTACLES, VIEW } from '../core/config.js'
 import { tuneFor } from '../core/difficulty.js'
-import { THEME } from '../core/theme.js'
+import { THEME, zonesOf } from '../core/theme.js'
 import { obstacleEdge } from './numbers'
 import { CORRIDOR_H_M, CROUCH_PITCH_GAIN, DRAW_FAR_M } from './types'
 import type { Decor, FrameScene, Obstacle, Placement, RunState, Star } from './types'
@@ -145,6 +145,29 @@ function placeStar(s: Star, elapsed: number, speed: number): Placement | null {
 }
 
 /**
+ * Ключи палитры, которые читает описание сцены. Перечислены ОДНИМ списком:
+ * `theme.js` — копия логики без типов, и без этого перечня опечатка в ключе
+ * прошла бы проверку типов молча и всплыла бы цветом «никакой» на телевизоре.
+ */
+type DecorTintKey =
+  | 'palmLeaf'
+  | 'flower'
+  | 'cactus'
+  | 'rock'
+  | 'firefly'
+  | 'spruce'
+  | 'post'
+  | 'totem'
+  | 'kelp'
+  | 'coral'
+  | 'anemone'
+  | 'spire'
+  | 'drift'
+  | 'crystal'
+  | 'shard'
+  | 'grassDark'
+
+/**
  * Каким ключом палитры красится вид обочины.
  *
  * Таблица живёт ЗДЕСЬ, в единственном экземпляре, и это прямое следствие
@@ -152,8 +175,9 @@ function placeStar(s: Star, elapsed: number, speed: number): Placement | null {
  * бы каждому способу вывода отдельно, а две копии одной таблицы — ровно та
  * протечка, от которой заведено «одно описание, два вывода».
  *
- * Умолчание — ключ, одноимённый виду: так в `drawDecor` и сделано для
- * одиннадцати видов из шестнадцати. Исключения перечислены ниже.
+ * Перечислены ВСЕ шестнадцать видов, а не только те, у кого ключ не совпал с
+ * именем: список вида и список ключа тогда видно рядом, и новый вид из
+ * `theme.js` не уедет молча на запасной цвет.
  *
  * ЦЕНА, и она принимается осознанно: старый Canvas2D-вывод красил вид
  * НЕСКОЛЬКИМИ цветами — у пальмы ствол `palmTrunk` и крона `palmLeaf`, у
@@ -164,22 +188,60 @@ function placeStar(s: Star, elapsed: number, speed: number): Placement | null {
  * (CLAUDE.md, «Miracast сжимает картинку»). Понадобится второй цвет — он
  * приедет вторым полем размещения, а не разбором палитры в каждом выводе.
  */
-const DECOR_TINT_KEY: Record<string, string> = {
-  // Крона больше ствола и первой говорит «пальма».
+const DECOR_TINT_KEY: Record<string, DecorTintKey> = {
+  // Крона больше ствола и первой говорит «пальма»; у куста своего ключа в
+  // палитре нет вовсе — он тоже красится листвой.
   palm: 'palmLeaf',
-  // У куста своего ключа нет вовсе: он красится листвой.
   bush: 'palmLeaf',
+  flower: 'flower',
+  cactus: 'cactus',
+  rock: 'rock',
+  firefly: 'firefly',
+  spruce: 'spruce',
+  post: 'post',
+  totem: 'totem',
+  kelp: 'kelp',
+  coral: 'coral',
+  anemone: 'anemone',
+  spire: 'spire',
+  drift: 'drift',
+  crystal: 'crystal',
+  shard: 'shard',
 }
 
-/* Приведение, а не типизация `theme.js`: копии логики живут под `allowJs` и
-   типов не несут, а править их здесь запрещено. Зона и ключ приходят строками
-   из тех же копий, поэтому неизвестная пара даёт `undefined` — размещение без
-   цвета, а не падение кадра. */
-const PALETTES = THEME as unknown as Record<string, Record<string, string> | undefined>
+/**
+ * Запасной цвет — тот же, которым старый вывод красит основания и стебли.
+ * Он есть во всех двенадцати палитрах, то есть запасной путь не может
+ * упереться в ещё одну дыру.
+ */
+const DECOR_TINT_FALLBACK: DecorTintKey = 'grassDark'
 
-/** Цвет элемента обочины: палитра ЕГО зоны, ключ — по его виду. */
-function decorTint(d: Decor): string | undefined {
-  return PALETTES[d.zone]?.[DECOR_TINT_KEY[d.kind] ?? d.kind]
+/* Приведение, а не типизация `theme.js`: копии логики живут под `allowJs` и
+   типов не несут, а править их здесь запрещено. Сужено до того, что отсюда
+   читается, — только ключи обочины, и каждый назван в `DecorTintKey`. */
+const PALETTES = THEME as unknown as Record<
+  string,
+  Partial<Record<DecorTintKey, string>> | undefined
+>
+
+/** Палитра по умолчанию: первая зона мира по умолчанию, как в `zoneAt`. */
+const DEFAULT_ZONE: string = zonesOf()[0]
+
+/**
+ * Цвет элемента обочины: палитра ЕГО зоны, ключ — по его виду.
+ *
+ * Ни одна из двух неизвестностей не отдаёт «ничего». Так же поступает старый
+ * вывод (`const C = THEME[d.zone] || COLORS`, `view.js:891`), и по той же
+ * причине, что записана у `zoneAt` (`theme.js:900`): функция, решающая цвет
+ * КАЖДОГО кадра, не вправе отвечать «никакой» — Canvas на `undefined` молча
+ * оставляет прежний цвет, а новый вывод оставит дыру. И не бросок:
+ * `composeScene` зовётся каждый кадр, исключение здесь — чёрный экран
+ * посреди забега у семилетнего, а это хуже правдоподобно неверного цвета.
+ */
+function decorTint(d: Decor): string {
+  const palette = PALETTES[d.zone] ?? PALETTES[DEFAULT_ZONE] ?? {}
+  const key = DECOR_TINT_KEY[d.kind] ?? DECOR_TINT_FALLBACK
+  return palette[key] ?? palette[DECOR_TINT_FALLBACK] ?? ''
 }
 
 function placeDecor(d: Decor, elapsed: number, speed: number): Placement | null {

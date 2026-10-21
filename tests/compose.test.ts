@@ -170,6 +170,27 @@ test('обочина красится палитрой СВОЕЙ зоны, а �
   expect(s.placements[1].tint).not.toBe(s.placements[0].tint)
 })
 
+test('незнакомая зона и незнакомый вид всё равно получают цвет', () => {
+  const s = composeScene(
+    stateWith({
+      decor: [
+        // Зоны с таким именем нет — палитра обязана найтись запасная.
+        decor({ kind: 'palm', zone: 'зоны-такой-нет', at: 2 }),
+        // Вид, которому ключ палитры не назначен (новый вид из theme.js).
+        decor({ kind: 'видa-такого-нет', zone: 'greenHill', at: 3 }),
+      ],
+      elapsed: 0,
+    }),
+  )
+  expect(s.placements).toHaveLength(2)
+  /* Цвет, а не `undefined` и не исключение: `composeScene` зовётся каждый
+     кадр, и «никакого цвета» — это дыра в кадре, а бросок — чёрный экран
+     посреди забега. Так же поступает `drawDecor` (`view.js:891`). */
+  expect(s.placements[0].tint).toBe(THEME.greenHill.palmLeaf)
+  expect(s.placements[1].tint).toBe(THEME.greenHill.grassDark)
+  for (const p of s.placements) expect(p.tint).toMatch(/^#|^rgb/)
+})
+
 test('обочина отсекается ближе общего горизонта', () => {
   /* Глубина между порогом обочины и общим горизонтом: препятствие там ещё
      рисуется, обочина уже нет. Одна сцена на оба — иначе проверка прошла бы
