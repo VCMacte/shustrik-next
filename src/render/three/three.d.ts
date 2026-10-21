@@ -95,6 +95,13 @@ declare module 'three' {
   export class BufferAttribute {
     constructor(array: ArrayLike<number>, itemSize: number, normalized?: boolean)
     readonly count: number
+    /**
+     * Номер версии буфера: по нему `WebGLRenderer` решает, перезаливать ли
+     * его на видеокарту. Единственное, что здесь можно ПРОЧИТАТЬ: сам
+     * `needsUpdate` в three объявлен только сеттером и при чтении отдаёт
+     * `undefined`.
+     */
+    readonly version: number
     needsUpdate: boolean
   }
 

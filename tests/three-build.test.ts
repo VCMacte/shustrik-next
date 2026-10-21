@@ -6,9 +6,14 @@
  * (CLAUDE.md; спека, «Бюджет считается по описанию, а не по устройству»).
  * Слева — `stats3D` живого графа three.js, собранного из НАСТОЯЩИХ `.glb`
  * настоящим `GLTFLoader`; справа — `estimate` по `assets/manifest.json`.
- * Две дороги к одному числу, и ни одна не проходит через другую: левая
- * читает двоичную геометрию из файла, правая — строку таблицы. Разойдутся —
- * значит одно из двух врёт.
+ * Две дороги к одному числу, и ни одна не проходит через другую: файл
+ * разбирают РАЗНЫЕ разборщики (`GLTFLoader` против `tools/asset-stat.mjs`),
+ * и арифметику группировки каждая сторона делает свою. Разойдутся — значит
+ * одно из двух врёт.
+ *
+ * Чего это НЕ доказывает: что в двоичном чанке лежит ровно столько вершин,
+ * сколько объявлено. Оба пути берут `count` у аккуратора в JSON-чанке, а
+ * двоичный лишь ограничивает диапазон.
  *
  * Каждая проверка здесь отвечает на вопрос «прошла бы она, если убрать то,
  * что она проверяет?» — ответ записан рядом с ней, потому что за прошлые
@@ -27,6 +32,7 @@ import {
   build3D,
   buildBackdrop,
   forgetMaterials,
+  refill3D,
   stats3D,
   textureUrlFor,
 } from '../src/render/three/build'
@@ -51,10 +57,11 @@ const table: AssetTable = JSON.parse(readFileSync(join(ASSETS, 'manifest.json'),
 /**
  * Загружает ВСЕ 43 заглушки настоящим `GLTFLoader`.
  *
- * Не фикстура: это те же файлы, которые уедут на устройство, и геометрия в
- * них читается из двоичного чанка, а не из таблицы. Именно поэтому сверка
- * ниже не круговая — число вершин слева приходит из `.glb`, справа из
- * `manifest.json`, и совпасть им неоткуда, кроме как по правде.
+ * Не фикстура: это те же файлы, которые уедут на устройство, и геометрию из
+ * них строит тот же загрузчик, что на телефоне. Именно поэтому сверка ниже
+ * не круговая: слева число приходит через `GLTFLoader`, справа — через
+ * собственный разборщик `tools/asset-stat.mjs`, и совпасть им неоткуда,
+ * кроме как по правде.
  */
 async function loadRealAssets(): Promise<LoadedAssets> {
   // GLTFLoader — модуль для браузера и ждёт `self`. Node его не даёт.
@@ -571,6 +578,81 @@ test('два кадра с одним набором ассетов идут п�
     verts: estimateFrame(other, table).verts,
   })
   renderer.dispose()
+})
+
+/**
+ * Переложенные координаты ПОМЕЧЕНЫ К ПЕРЕЗАЛИВКЕ.
+ *
+ * Самая тихая из возможных поломок, и найдена она ревью, а не прогоном:
+ * `setMatrixAt` пишет в оперативную память, а на видеокарту буфер заливает
+ * `WebGLRenderer` — и только если выставлен `instanceMatrix.needsUpdate`.
+ * Убери эту строку, и на поддельном выводе НЕ изменится ничего (никто
+ * ничего не заливает), а на устройстве кадр замрёт на первом. Замерший
+ * кадр покажет прекрасный `gap95` и ложно выиграет развилку «3D или 2.5D» —
+ * то есть соврёт ровно тому замеру, ради которого всё строится.
+ *
+ * Проверяется `version`, а не `needsUpdate`: у `BufferAttribute` в three
+ * `needsUpdate` — свойство ТОЛЬКО НА ЗАПИСЬ (сеттер поднимает `version`),
+ * и прочитать его нельзя, вернётся `undefined`. Сравнивать надо то, на что
+ * смотрит сам `WebGLRenderer`, — номер версии буфера.
+ *
+ * Прошла бы вхолостую? НЕТ, проверено мутацией: удали
+ * `instanceMatrix.needsUpdate = true` из `fillInstances` — падает.
+ */
+test('переложенные координаты помечены к перезаливке на видеокарту', async () => {
+  const { renderer } = await makeTestRenderer()
+  const at = (z: number) => sceneWith([{ asset: 'decor/kelp', z }, { asset: 'decor/kelp', z: z + 4 }])
+  renderer.draw(at(5))
+
+  const kelp = () => {
+    let found: THREE.InstancedMesh | null = null
+    renderer.root().traverse((o: any) => {
+      if (o.isMesh && o.name === 'decor/kelp') found = o
+    })
+    return found as unknown as THREE.InstancedMesh
+  }
+  const mesh = kelp()
+  const before = mesh.instanceMatrix.version
+
+  renderer.draw(at(4.5))
+  // Меш тот же самый — значит перезаливка и есть единственный способ, каким
+  // новые координаты попадут на видеокарту.
+  expect(kelp()).toBe(mesh)
+  expect(mesh.instanceMatrix.version).toBeGreaterThan(before)
+  renderer.dispose()
+})
+
+/**
+ * Цвет не остаётся от прошлого кадра, когда в новом его нет.
+ *
+ * Зазор латентный: сегодня `tint` у обочины есть всегда (`decorTint` отдаёт
+ * `grassDark`, который есть во всех двенадцати палитрах), и кадра без него
+ * не бывает. Но «не бывает сегодня» — свойство ДАННЫХ, а не кода: появится
+ * размещение с необязательным `tint`, и переиспользованный меш покажет цвет
+ * прошлого кадра там, где свежесобранный дал бы белый.
+ *
+ * Прошла бы вхолостую? НЕТ: верни условие записи цвета к `tinted` — и
+ * второй кадр останется синим.
+ */
+test('исчезнувший цвет не остаётся от прошлого кадра', () => {
+  const assets: LoadedAssets = { 'decor/kelp': fakeAsset([3]) }
+  const tinted = sceneWith([{ asset: 'decor/kelp', tint: '#204080' }])
+  const group = build3D(tinted, assets)
+  const mesh = group.children[0] as THREE.InstancedMesh
+  const c = new THREE.Color()
+  mesh.getColorAt(0, c)
+  expect(c.getHexString()).toBe('204080')
+
+  // Тот же набор и то же число размещений, но цвета в описании больше нет.
+  const plain = sceneWith([{ asset: 'decor/kelp' }])
+  expect(refill3D(group, plain.placements, assets)).toBe(true)
+  mesh.getColorAt(0, c)
+  expect(c.getHexString()).toBe('ffffff')
+
+  // И ровно то же самое даёт сборка с нуля — два пути, один кадр.
+  const fresh = build3D(plain, assets) as THREE.Group
+  const freshMesh = fresh.children[0] as THREE.InstancedMesh
+  expect(freshMesh.instanceColor).toBeNull()
 })
 
 /**

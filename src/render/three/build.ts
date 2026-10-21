@@ -208,15 +208,30 @@ function placementMatrix(p: Placement, local: THREE.Matrix4): THREE.Matrix4 {
  */
 function fillInstances(mesh: THREE.InstancedMesh, prim: Primitive, list: Placement[]): void {
   /* Цвет заводится только если он кому-то нужен: `instanceColor` — лишний
-     буфер на GPU, а у препятствий и колец `tint` не бывает вовсе. */
+     буфер на GPU, а у препятствий и колец `tint` не бывает вовсе.
+     НО: если буфер цвета у меша УЖЕ есть, писать в него надо и тогда, когда
+     в новом кадре цвета ни у кого нет. Иначе в переиспользованном меше
+     остался бы цвет прошлого кадра, а свежесобранный дал бы белый — два
+     разных кадра из одного описания, и расходились бы они молча. Сегодня
+     такой кадр недостижим (`decorTint` всегда что-то возвращает: `grassDark`
+     есть во всех двенадцати палитрах), но «недостижимо сегодня» — это не
+     свойство кода, а свойство данных, и держать на нём правильность
+     отрисовки нельзя. */
   const tinted = list.some((p) => p.tint)
+  const colored = tinted || mesh.instanceColor !== null
   for (let i = 0; i < list.length; i++) {
     mesh.setMatrixAt(i, placementMatrix(list[i], prim.local))
-    if (tinted) {
+    if (colored) {
       const tint = list[i].tint
       mesh.setColorAt(i, tint ? tmpColor.set(tint) : WHITE)
     }
   }
+  /* БЕЗ этих двух строк буфер не уедет на видеокарту, и кадр ЗАМРЁТ на
+     первом: `setMatrixAt` пишет в оперативную память, а заливает её
+     `WebGLRenderer`, и только по этому флагу. На поддельном выводе такого не
+     видно вовсе — никто ничего не заливает, — поэтому флаг требует
+     отдельная проверка. Из всех способов соврать замеру этот самый тихий:
+     замерший кадр покажет прекрасный `gap95` и ложно выиграет развилку. */
   mesh.instanceMatrix.needsUpdate = true
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
 }
