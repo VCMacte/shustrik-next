@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["vite/client", "node"],
+    /*
+     * `src/core/*.js` — побайтовые копии логики из run-game, а не новый код:
+     * их нельзя ни переводить на TypeScript, ни ронять typecheck на их
+     * синтаксисе. allowJs пускает их в сборку графа типов, checkJs не лезет
+     * проверять их содержимое.
+     */
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src", "tests", "tools", "vite.config.ts", "vitest.config.ts"]
+}
