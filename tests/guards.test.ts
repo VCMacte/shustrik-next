@@ -128,6 +128,11 @@ test('core и compose не знают про three — ни прямо, ни т�
   const entryPoints = [
     ...listFiles(join(ROOT, 'src/core')),
     join(ROOT, 'src/render/compose.ts'),
+    /* `estimate.ts` — та же половина стыка, что и `compose.ts`: бюджет кадра
+       обязан считаться там, где `three` нет вовсе, иначе он перестанет быть
+       проверкой РАЗВИЛКИ и станет проверкой одной её половины. Прибавлен
+       здесь, а не заведён вторым стражем: цель одна, обход графа один. */
+    join(ROOT, 'src/render/estimate.ts'),
   ].filter(isFile)
 
   for (const entry of entryPoints) {
@@ -166,6 +171,10 @@ test('src/render/compose.ts существует, если уже существ
   const renderDirExists = statSync(join(ROOT, 'src/render'), { throwIfNoEntry: false })?.isDirectory() ?? false
   if (!renderDirExists) return
   expect(isFile(join(ROOT, 'src/render/compose.ts'))).toBe(true)
+  // По той же причине: пока `estimate.ts` не существует, его половина стража
+  // выше отфильтровывается молча, и зелёный тест при нулевом покрытии
+  // неотличим от зелёного при полном.
+  expect(isFile(join(ROOT, 'src/render/estimate.ts'))).toBe(true)
 })
 
 // ───────────────── стык со старым Canvas2D-рендерером (view/preview) ──────
