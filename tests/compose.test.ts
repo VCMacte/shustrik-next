@@ -7,7 +7,7 @@
  * трёх чисел ниже не зависит от того, чем кадр будет нарисован.
  */
 import { expect, test } from 'vitest'
-import { composeScene } from '../src/render/compose'
+import { composeScene, DECOR_TINT_KEY } from '../src/render/compose'
 import { DRAW_FAR_M } from '../src/render/types'
 import type { Decor, Obstacle, RunState, Star } from '../src/render/types'
 import { tuneFor } from '../src/core/difficulty.js'
@@ -168,6 +168,26 @@ test('обочина красится палитрой СВОЕЙ зоны, а �
      второе принадлежит ночной зоне и обязано быть в её цвете. */
   expect(s.placements[1].tint).toBe(THEME.nightHills.palmLeaf)
   expect(s.placements[1].tint).not.toBe(s.placements[0].tint)
+})
+
+test('каждому виду обочины из theme.js назначен свой цвет', () => {
+  /* Список видов берётся ИЗ ДАННЫХ, а не переписывается сюда руками:
+     переписанный список разъехался бы с `theme.js` ровно так же, как
+     разъезжается `DECOR_TINT_KEY`, только на уровень выше. */
+  const виды = new Set<string>()
+  for (const palette of Object.values(THEME) as Array<{
+    decor?: { kinds?: Array<{ kind: string }> }
+  }>) {
+    for (const k of palette.decor?.kinds ?? []) виды.add(k.kind)
+  }
+  expect(виды.size).toBeGreaterThan(0)
+
+  /* Запасной цвет — для вида, которого в `theme.js` нет вовсе (чужой журнал,
+     инструмент). Вид, который там ЕСТЬ, обязан иметь свой: иначе новый вид,
+     приехавший `sync-logic`, тихо покрасится в `grassDark`, и не упадёт
+     ничего — ровно тот отказ, который этот проект ловит чаще прочих. */
+  const безЦвета = [...виды].filter((kind) => DECOR_TINT_KEY[kind] === undefined)
+  expect(безЦвета).toEqual([])
 })
 
 test('незнакомая зона и незнакомый вид всё равно получают цвет', () => {
