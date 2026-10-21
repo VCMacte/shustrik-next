@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.DS_Store
+Thumbs.db
+*.log
+.playwright-mcp/
+.superpowers/
+.tmp/
+
+# Журналы с телефона лежат локально: репозиторий публичный, а это записи
+# о ребёнке. То же правило, что в run-game. Папка и README остаются.
+logs/*
+!logs/README.md
+
+# Промежуточное арта: то, что вернула нейросеть, и запечённые атласы.
+# В приложение уходит только assets/*.glb и сжатые текстуры.
+tools/baked/
+tools/raw/
