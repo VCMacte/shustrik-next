@@ -32,8 +32,8 @@ import {
 } from '../src/render/estimate'
 import type { AssetTable } from '../src/render/estimate'
 import type { FrameScene, Placement } from '../src/render/types'
-import { WORLDS } from '../src/core/theme.js'
-import { DURATION_S, FRAME_STEP_S, SEEDS, worstFrame } from '../tools/budget.mjs'
+import { WORLDS, worldReady } from '../src/core/theme.js'
+import { DURATION_S, FRAME_STEP_S, SEEDS, measuredWorlds, worstFrame } from '../tools/budget.mjs'
 import { STEP_MAX } from '../src/core/difficulty.js'
 
 /** Таблица ассетов — та самая, которую считает `tools/asset-stat.mjs`. */
@@ -137,6 +137,41 @@ test('пустая сцена даёт нули, а не NaN', () => {
 test('текстурная память считается по РАЗНЫМ ассетам, а не по размещениям', () => {
   const two = sceneWith([{ asset: 'decor/kelp' }, { asset: 'decor/kelp' }])
   expect(estimate(two, table).texBytes).toBe(table['decor/kelp'].texBytes)
+  /* И в ветке БЕЗ инстансирования — тоже по разным ассетам: карта резидентна
+     один раз, сколько бы раз её ни нарисовали. Инстансирование меняет число
+     ВЫЗОВОВ, а не то, сколько текстур лежит в видеопамяти. Первая версия
+     умножала здесь текстуру на размещения, и число никуда не судилось — но
+     оно отдаётся наружу, а заряженная цифра в открытом API однажды будет
+     прочитана как правда.
+     Прошла бы вхолостую? НЕТ: мутация, умножающая текстуру на размещения,
+     даёт здесь 2 810 184 вместо 1 405 092 (в худшем кадре — 34.8 МБ вместо
+     21.4) и роняет эту строку. */
+  expect(estimateWithoutInstancing(two, table).texBytes).toBe(table['decor/kelp'].texBytes)
+  expect(estimateWithoutInstancing(two, table).calls).toBe(2 * table['decor/kelp'].calls)
+})
+
+/**
+ * Постоянная часть кадра не должна ДВОИТЬСЯ с размещениями, и держаться это
+ * обязано проверкой, а не комментарием.
+ *
+ * Сегодня `composeScene` таких имён не выдаёт, поэтому сложение в
+ * `estimateFrame` ничего не двоит. Но это свойство ЧУЖОГО файла: начни
+ * `compose` однажды выдавать `sky/*` — например, чтобы спрайтовый вывод
+ * размещал небо сам, — и небо посчиталось бы дважды. Молча, и в сторону
+ * «тяжелее правды», то есть без всякого внешнего признака.
+ *
+ * Прошла бы вхолостую? НЕТ: убери отказ из `estimateFrame` — и `toThrow`
+ * упадёт (проверено мутацией). А то, что ни один НАСТОЯЩИЙ кадр его не
+ * задевает, проверяется не здесь, а перебором: `worstFrame` зовёт
+ * `estimateFrame` на 96 000 кадрах игры, и любое пересечение уронило бы
+ * снимок худшего кадра.
+ */
+test('постоянная часть кадра, попавшая в размещения, падает громко', () => {
+  for (const asset of backdropAssets(emptyScene)) {
+    expect(() => estimateFrame(sceneWith([{ asset }]), table)).toThrow(/уже посчитано/)
+  }
+  // А размещение, которое `compose` действительно выдаёт, отказа не вызывает.
+  expect(() => estimateFrame(sceneWith([{ asset: 'decor/kelp' }]), table)).not.toThrow()
 })
 
 // ──────────────── постоянная часть кадра: коридор и небо ────────────────
@@ -194,8 +229,16 @@ test('кадр в зоне без неба падает громко, а не с
 test(
   'худший кадр укладывается в потолок по КАЖДОМУ миру',
   async () => {
-    const worlds = Object.keys(WORLDS)
+    /* Список миров берётся у ЕДИНСТВЕННОГО владельца (`measuredWorlds`), а
+       не собирается здесь вторично: раньше тест перебирал все миры, а прогон
+       — только собранные, и совпадали они лишь потому, что собраны все
+       четыре. Несобранный мир развёл бы «что судим» и «что печатаем» молча.
+       Здесь же проверяется, что владелец не отдаёт мусора: все названные им
+       миры существуют в `WORLDS` и собраны. */
+    const worlds: string[] = measuredWorlds()
     expect(worlds.length).toBeGreaterThan(1)
+    for (const w of worlds) expect(worldReady(w)).toBe(true)
+    expect(worlds.every((w) => w in WORLDS)).toBe(true)
 
     const byWorld: Record<string, Awaited<ReturnType<typeof worstFrame>>> = {}
     for (const world of worlds) byWorld[world] = await worstFrame(world, table)
@@ -242,6 +285,30 @@ test(
     const framesPerWorld = SEEDS.length * (STEP_MAX + 1) * (DURATION_S / FRAME_STEP_S)
     for (const world of worlds) expect(byWorld[world].frames).toBe(framesPerWorld)
     expect(new Set(worlds.map((w) => byWorld[w].calls)).size).toBeGreaterThan(1)
+
+    /*
+     * НЕЗАВИСИМАЯ нижняя граница вызовов, не проходящая через документ.
+     *
+     * Ревью заметило, что от ЗАНИЖЕНИЯ вызовов снимок держался одной опорой —
+     * точным равенством с числом в `docs/art-placeholders.md`: потолок (12 из
+     * 150) и нижняя граница по постоянной части занижение пропускают, и убери
+     * кто-нибудь сверку с документом — оно прошло бы молча. Вот вторая опора,
+     * которой документ не нужен.
+     *
+     * Устроена она так: перебор считает своим множеством, сколько РАЗНЫХ
+     * ассетов стоит в кадре (`distinctAssets`), и к арифметике `estimate.ts`
+     * это число не причастно. У каждого ассета вызовов хотя бы один, значит
+     * вызовов в кадре не меньше, чем разных ассетов. Граница при этом ТУГАЯ:
+     * считано 15 разных ассетов и 15 вызовов, так что занижение даже на один
+     * вызов её ломает — проверено мутацией при отключённой сверке с
+     * документом.
+     */
+    const distinctMax = Math.max(...worlds.map((w) => byWorld[w].distinctAssets))
+    expect(distinctMax).toBeGreaterThan(1)
+    expect(
+      Math.max(...worlds.map((w) => byWorld[w].calls)),
+      'вызовов в кадре не может быть меньше, чем разных ассетов в нём',
+    ).toBeGreaterThanOrEqual(distinctMax)
 
     for (const world of worlds) {
       const w = byWorld[world]

@@ -125,15 +125,21 @@ function sum(placements: Placement[], assets: AssetTable, instanced: boolean): B
     /* Вершины — всегда по размещению: вторая пальма даёт столько же вершин,
        в один вызов она попала или в свой. */
     verts += cost.verts
-    if (!instanced) {
-      calls += cost.calls
-      texBytes += cost.texBytes
-      continue
-    }
-    if (counted.has(p.asset)) continue
-    counted.add(p.asset)
-    calls += cost.calls
-    texBytes += cost.texBytes
+
+    const firstOfItsKind = !counted.has(p.asset)
+    if (firstOfItsKind) counted.add(p.asset)
+
+    /* Текстура резидентна в видеопамяти ОДИН раз, сколько бы раз её ни
+       нарисовали, — и это не зависит от инстансирования. Поэтому `texBytes`
+       считается по разным ассетам в ОБЕИХ ветках. Первая версия умножала её
+       на размещения в ветке без инстансирования: число никуда не судилось,
+       но оно отдаётся наружу, и заряженная цифра в открытом API рано или
+       поздно будет кем-то прочитана как правда. */
+    if (firstOfItsKind) texBytes += cost.texBytes
+
+    /* А вот ВЫЗОВЫ без инстансирования — по каждому размещению: именно в
+       этом разница между «слили в один батч» и «нарисовали по одному». */
+    if (!instanced || firstOfItsKind) calls += cost.calls
   }
 
   return { calls, verts, texBytes }
@@ -177,6 +183,29 @@ export type FrameBudget = Budget & {
 }
 
 export function estimateFrame(scene: FrameScene, assets: AssetTable): FrameBudget {
+  /*
+   * ПОСТОЯННАЯ ЧАСТЬ НЕ ДОЛЖНА ДВОИТЬСЯ С РАЗМЕЩЕНИЯМИ, и держаться это
+   * обязано проверкой, а не комментарием.
+   *
+   * Сегодня `composeScene` выдаёт только `obstacle/*`, `star/*` и `decor/*`,
+   * поэтому прямое сложение ниже ничего не двоит. Но это свойство ЧУЖОГО
+   * файла, а не наше: начни `compose` однажды выдавать `sky/*` — скажем,
+   * чтобы спрайтовый вывод разместил небо сам, — и небо посчиталось бы
+   * дважды, молча и в ту сторону, которая делает бюджет ТЯЖЕЛЕЕ правды, то
+   * есть без всякого внешнего признака. Отказ здесь громкий и немедленный:
+   * если постоянная часть переехала в описание, слагаемое ниже обязано
+   * уехать вместе с ней, а не остаться вторым.
+   */
+  const standing = new Set(backdropAssets(scene))
+  for (const p of scene.placements) {
+    if (standing.has(p.asset)) {
+      throw new Error(
+        `размещение ${p.asset} уже посчитано как постоянная часть кадра:` +
+          ' оно удвоилось бы в бюджете',
+      )
+    }
+  }
+
   const placements = estimate(scene, assets)
   /* Постоянная часть идёт через тот же счётчик, что и размещения: иначе у
      неё завелась бы своя арифметика, и расходиться они начали бы молча.

@@ -77,6 +77,21 @@ function seeded(seed) {
   }
 }
 
+/**
+ * Миры, по которым мерится бюджет. ЕДИНСТВЕННЫЙ владелец этого списка.
+ *
+ * Только собранные: у несобранного мира нет зон (`zonesOf` отдаёт ему зоны
+ * холмов), мерить там нечего, и счётчик `run-game` фильтрует так же. Но
+ * владелец обязан быть один: тест перебирал `Object.keys(WORLDS)`, а прогон
+ * — отфильтрованный список, и сегодня они совпадали ровно потому, что
+ * собраны все четыре мира. Пятый, несобранный, развёл бы их молча — и бюджет
+ * начал бы СУДИТЬ не то, что ПЕЧАТАЕТ. Отсюда функция, а не константа: состав
+ * зависит от `worldReady`, то есть от палитры, и застыть в снимке не вправе.
+ */
+export function measuredWorlds() {
+  return Object.keys(WORLDS).filter((w) => worldReady(w))
+}
+
 /** Таблица ассетов с диска: её считает `tools/asset-stat.mjs`. */
 export function loadAssets() {
   return JSON.parse(readFileSync(join(ROOT, 'assets', 'manifest.json'), 'utf8'))
@@ -143,6 +158,7 @@ export async function worstFrame(world, assets, deps = {}) {
   const loaded = await loadCounters()
   const compose = deps.composeScene ?? loaded.composeScene
   const estimate = deps.estimateFrame ?? loaded.estimateFrame
+  const backdrop = deps.backdropAssets ?? loaded.backdropAssets
 
   const prizes = unlockedAt(FULL_BANK)
   const best = {
@@ -152,6 +168,13 @@ export async function worstFrame(world, assets, deps = {}) {
     callsNoInstancing: 0,
     verts: 0,
     texBytes: 0,
+    /* Сколько РАЗНЫХ ассетов стоит в кадре — считается здесь, своим
+       множеством, и к арифметике `estimate.ts` не причастно. Нужно это как
+       НЕЗАВИСИМАЯ нижняя граница вызовов: у каждого ассета вызовов хотя бы
+       один, значит вызовов в кадре не меньше, чем разных ассетов. Сверка с
+       этим числом — единственная опора снимка худшего кадра, которая не
+       проходит через документ. */
+    distinctAssets: 0,
     zone: null,
     seed: null,
     step: null,
@@ -228,6 +251,9 @@ export async function worstFrame(world, assets, deps = {}) {
           best.backdrop = b.backdrop
           best.placementCount = scene.placements.length
         }
+        const kinds = new Set(scene.placements.map((p) => p.asset))
+        for (const a of backdrop(scene)) kinds.add(a)
+        note('distinctAssets', kinds.size, where)
         note('calls', b.calls, where)
         note('callsNoInstancing', b.callsNoInstancing, where)
         note('verts', b.verts, where)
@@ -245,8 +271,7 @@ async function main() {
   const { CEILING_CALLS, SOFT_CALLS, CEILING_VERTS, CEILING_TEX_BYTES } = await loadCounters()
   const assets = loadAssets()
 
-  /* Только собранные миры: у остальных нет зон, мерить нечего. */
-  const worlds = Object.keys(WORLDS).filter((w) => worldReady(w))
+  const worlds = measuredWorlds()
   const byWorld = {}
   for (const world of worlds) byWorld[world] = await worstFrame(world, assets)
 
@@ -266,6 +291,7 @@ async function main() {
   const NOINST = byWorld[noInstWorld].callsNoInstancing
   const VERTS = byWorld[vertsWorld].verts
   const TEX = byWorld[texWorld].texBytes
+  const DISTINCT = byWorld[across('distinctAssets')].distinctAssets
 
   console.log('')
   console.log(
@@ -292,6 +318,10 @@ async function main() {
     `  БЕЗ инстансирования худший кадр прогона: ${NOINST} вызовов` +
       ` (мир ${noInstWorld}) при том же потолке ${CEILING_CALLS} —` +
       ` ${NOINST < CEILING_CALLS ? 'укладывается' : 'НЕ УКЛАДЫВАЕТСЯ'}`,
+  )
+  console.log(
+    `  разных ассетов в кадре (максимум прогона): ${DISTINCT}` +
+      ' — независимая нижняя граница вызовов, считанная не счётчиком',
   )
   console.log(
     `  вершин (максимум прогона): ${VERTS} (мир ${vertsWorld})` +
@@ -321,6 +351,9 @@ async function main() {
     [`вызовы БЕЗ инстансирования < ${CEILING_CALLS}`, NOINST < CEILING_CALLS, true],
     [`вершины < ${CEILING_VERTS}`, VERTS < CEILING_VERTS, true],
     [`текстуры кадра ≤ ${MB(CEILING_TEX_BYTES)} МБ`, TEX <= CEILING_TEX_BYTES, true],
+    /* Не потолок, а сторож против ЗАНИЖЕНИЯ: вызовов не может быть меньше,
+       чем разных ассетов в кадре, и считаны эти два числа по-разному. */
+    [`вызовов не меньше, чем разных ассетов (${DISTINCT})`, W.calls >= DISTINCT, true],
   ]
   for (const [what, ok] of verdicts) console.log(`${ok ? '  да ' : '  НЕТ'} ${what}`)
   console.log('')
