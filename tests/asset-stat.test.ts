@@ -522,17 +522,29 @@ test('объявленный размер текстуры совпадает с
   const refs = imageRefsOnDisk()
   const checked: string[] = []
   for (const r of refs) {
-    const actual = pngSize(r.resolved)
-    expect(actual, `${relative(ROOT, r.resolved).split(sep).join('/')}`).toEqual(r.declared)
+    // Оба файла в сообщении, а не только недостающий: «нет такого PNG» без
+    // имени `.glb`, который на него ссылается, стоит получаса поиска. Для
+    // сторожа существования выше это сделано сразу, здесь — довезено.
+    const where =
+      `${relative(ROOT, r.resolved).split(sep).join('/')} ` +
+      `(ссылается ${relative(ROOT, r.glb).split(sep).join('/')})`
+    let actual
+    try {
+      actual = pngSize(r.resolved)
+    } catch (e) {
+      throw new Error(`${where}: ${(e as Error).message}`)
+    }
+    expect(actual, where).toEqual(r.declared)
     checked.push(r.resolved)
   }
-  /* Утверждение, а не тавтология. Прежняя строка была
-     `toBeGreaterThanOrEqual(0)` — истинная всегда: при удалённых картинках
-     сторож оставался зелёным, проверив ноль. Теперь проверено обязано быть
-     РОВНО столько, сколько ссылок, и пропуск отсутствующего файла убран —
-     его отсутствие обязано уронить `pngSize` с внятным сообщением, а не тихо
-     сократить выборку. */
-  expect(checked.length).toBe(refs.length)
+  /* Счёт проверенного сверяется с ЛИСТИНГОМ КАТАЛОГА, а не с длиной того же
+     списка, по которому шёл цикл. Разница не придирка: `checked` набирается в
+     цикле по одному элементу на итерацию без исключений, поэтому
+     `checked.length === refs.length` истинно ПО ПОСТРОЕНИЮ — это сверка
+     источника с самим собой, то есть ровно та ошибка, от которой шапка этого
+     файла предупреждает про круговую проверку. Здесь вторая сторона своя:
+     одна приходит из разбора `.glb`, другая из `readdirSync`. */
+  expect(checked.length).toBe(listPngOnDisk(join(ASSETS, 'tex')).length)
 })
 
 test('больше одной карты — только у obstacle/jelly, и это ревизуется', () => {
