@@ -143,7 +143,12 @@ test('core и compose не знают про three — ни прямо, ни т�
 test('логика не переведена на TypeScript', () => {
   const core = readdirSync(join(ROOT, 'src/core'))
   expect(core.length).toBeGreaterThan(0)
-  expect(core.every((f) => f.endsWith('.js') || f === '.gitkeep')).toBe(true)
+  // logic.manifest.json (Task 2, tools/sync-logic.mjs) — не логика и не её
+  // перевод на TypeScript, а хеши самих .js-копий; исключение того же рода,
+  // что .gitkeep до их приезда, а не ослабление проверки.
+  expect(
+    core.every((f) => f.endsWith('.js') || f === '.gitkeep' || f === 'logic.manifest.json'),
+  ).toBe(true)
 })
 
 /**
