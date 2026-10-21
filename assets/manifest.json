@@ -1,0 +1,217 @@
+{
+  "corridor/floor": {
+    "calls": 1,
+    "verts": 4,
+    "texBytes": 1405092
+  },
+  "corridor/walls": {
+    "calls": 1,
+    "verts": 8,
+    "texBytes": 1405092
+  },
+  "decor/anemone": {
+    "calls": 1,
+    "verts": 8,
+    "texBytes": 1405092
+  },
+  "decor/bush": {
+    "calls": 1,
+    "verts": 8,
+    "texBytes": 1405092
+  },
+  "decor/cactus": {
+    "calls": 1,
+    "verts": 30,
+    "texBytes": 1405092
+  },
+  "decor/coral": {
+    "calls": 1,
+    "verts": 8,
+    "texBytes": 1405092
+  },
+  "decor/crystal": {
+    "calls": 1,
+    "verts": 30,
+    "texBytes": 1405092
+  },
+  "decor/drift": {
+    "calls": 1,
+    "verts": 30,
+    "texBytes": 1405092
+  },
+  "decor/firefly": {
+    "calls": 1,
+    "verts": 36,
+    "texBytes": 1405092
+  },
+  "decor/flower": {
+    "calls": 1,
+    "verts": 8,
+    "texBytes": 1405092
+  },
+  "decor/kelp": {
+    "calls": 1,
+    "verts": 8,
+    "texBytes": 1405092
+  },
+  "decor/palm": {
+    "calls": 1,
+    "verts": 8,
+    "texBytes": 1405092
+  },
+  "decor/post": {
+    "calls": 1,
+    "verts": 30,
+    "texBytes": 1405092
+  },
+  "decor/rock": {
+    "calls": 1,
+    "verts": 30,
+    "texBytes": 1405092
+  },
+  "decor/shard": {
+    "calls": 1,
+    "verts": 30,
+    "texBytes": 1405092
+  },
+  "decor/spire": {
+    "calls": 1,
+    "verts": 30,
+    "texBytes": 1405092
+  },
+  "decor/spruce": {
+    "calls": 1,
+    "verts": 8,
+    "texBytes": 1405092
+  },
+  "decor/totem": {
+    "calls": 1,
+    "verts": 30,
+    "texBytes": 1405092
+  },
+  "obstacle/asteroid": {
+    "calls": 1,
+    "verts": 24,
+    "texBytes": 1405092
+  },
+  "obstacle/bat": {
+    "calls": 1,
+    "verts": 18,
+    "texBytes": 1405092
+  },
+  "obstacle/beam": {
+    "calls": 1,
+    "verts": 24,
+    "texBytes": 1405092
+  },
+  "obstacle/ceiling": {
+    "calls": 1,
+    "verts": 18,
+    "texBytes": 1405092
+  },
+  "obstacle/comet": {
+    "calls": 1,
+    "verts": 18,
+    "texBytes": 1405092
+  },
+  "obstacle/floe": {
+    "calls": 1,
+    "verts": 24,
+    "texBytes": 1405092
+  },
+  "obstacle/gate": {
+    "calls": 1,
+    "verts": 24,
+    "texBytes": 1405092
+  },
+  "obstacle/icicles": {
+    "calls": 1,
+    "verts": 18,
+    "texBytes": 1405092
+  },
+  "obstacle/jelly": {
+    "calls": 2,
+    "verts": 48,
+    "texBytes": 2810184
+  },
+  "obstacle/plate": {
+    "calls": 1,
+    "verts": 24,
+    "texBytes": 1405092
+  },
+  "obstacle/ribs": {
+    "calls": 1,
+    "verts": 18,
+    "texBytes": 1405092
+  },
+  "sky/abyssGlow": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/auroraNight": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/cloudTop": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/cometBelt": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/greenHill": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/iceMorning": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/kelpDeep": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/nebula": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/nightHills": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/reefShallow": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/snowField": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "sky/sunsetDunes": {
+    "calls": 1,
+    "verts": 50,
+    "texBytes": 2810184
+  },
+  "star/big": {
+    "calls": 1,
+    "verts": 153,
+    "texBytes": 1405092
+  },
+  "star/ring": {
+    "calls": 1,
+    "verts": 91,
+    "texBytes": 1405092
+  }
+}

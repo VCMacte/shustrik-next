@@ -17,6 +17,8 @@ npm run dev            # vite, http://localhost:5173
 npm test               # typecheck + vitest
 npm run budget         # худший кадр по мирам, без телефона
 node tools/sync-logic.mjs --check            # не разъехались ли копии логики
+node tools/make-placeholder-assets.mjs       # перезаписать заглушки assets/**.glb
+node tools/asset-stat.mjs                    # пересчитать assets/manifest.json из .glb
 ```
 
 ## Инварианты, которые задевает любая правка
