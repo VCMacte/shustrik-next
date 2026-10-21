@@ -7,7 +7,7 @@
  * быть описанием: один из способов вывода станет приватной правдой другого,
  * и сравнивать их станет нечем.
  */
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { expect, test } from 'vitest'
 
@@ -167,38 +167,60 @@ test('src/render/compose.ts существует, если уже существ
 
 /**
  * `view.js` и `preview.js` — старый Canvas2D-рендерер, который приедет в
- * Task 2 только потому, что от него зависят `level.js` и `train.js`. Новая
- * отрисовка не должна знать об этих файлах НИГДЕ, кроме одного стыка —
- * `src/render/numbers.ts`, которого пока не существует.
+ * Task 2 только потому, что от него зависят `level.js` и `train.js`. Ничто
+ * под `src/` не должно знать об этих файлах НИГДЕ, кроме одного стыка —
+ * `src/render/numbers.ts` (решение и его стоимость — в разделе «Что
+ * переносится...» спеки), которого пока не существует.
  *
- * Разовая проверка файлом-нарушителем от регресса самой регулярки не
- * защищает: сторож, который ничего не ловит, выглядит как зелёный тест
- * («всё сошлось» при нуле новых проверок выглядит так же, как при восьми).
+ * Матчер строгости не ниже, чем у `three`-стража выше: та же
+ * `extractImportSpecifiers`, а не вторая, более слабая регулярка на одну
+ * форму импорта. Старый матчер ловил только `from '…/view'` и пропускал
+ * безэффектный `import '…/view.js'` и динамический `import('…/view.js')`.
  */
-const IMPORTS_OLD_RENDERER = /from\s+['"][^'"]*\/(view|preview)(\.js)?['"]/
+function isOldRendererSpecifier(spec: string): boolean {
+  return /\/(view|preview)(\.js)?$/.test(spec)
+}
 
-test('регулярка стыка со старым рендерером ловит настоящую строку импорта', () => {
-  expect(IMPORTS_OLD_RENDERER.test("import { draw } from '../core/view.js'")).toBe(true)
-  expect(IMPORTS_OLD_RENDERER.test("import { draw } from '../core/view'")).toBe(true)
-  expect(IMPORTS_OLD_RENDERER.test("import { paint } from './preview.js'")).toBe(true)
+test('матчер стыка со старым рендерером ловит все формы импорта и не путает созвучные имена', () => {
+  expect(extractImportSpecifiers("import { draw } from '../core/view.js'")).toContain(
+    '../core/view.js',
+  )
+  expect(extractImportSpecifiers("import '../core/view.js'")).toContain('../core/view.js')
+  expect(extractImportSpecifiers("await import('../core/preview.js')")).toContain(
+    '../core/preview.js',
+  )
+  expect(extractImportSpecifiers("require('./preview.js')")).toContain('./preview.js')
+
+  expect(isOldRendererSpecifier('../core/view.js')).toBe(true)
+  expect(isOldRendererSpecifier('../core/view')).toBe(true)
+  expect(isOldRendererSpecifier('./preview.js')).toBe(true)
   // Похожие имена не должны ловиться по совпадению подстроки.
-  expect(IMPORTS_OLD_RENDERER.test("import { x } from '../core/viewport.js'")).toBe(false)
-  expect(IMPORTS_OLD_RENDERER.test("import { x } from './previewCard'")).toBe(false)
-  expect(IMPORTS_OLD_RENDERER.test("// про view и preview здесь только слова")).toBe(false)
+  expect(isOldRendererSpecifier('../core/viewport.js')).toBe(false)
+  expect(isOldRendererSpecifier('./previewCard')).toBe(false)
 })
 
 test('только src/render/numbers.ts может знать про старый рендерер view.js и preview.js', () => {
   const chokepoint = join(ROOT, 'src/render/numbers.ts')
-  // .js/.mjs — потому что Task 2 привозит копии логики как .js, и файл под
-  // src/render тоже может оказаться .js/.mjs, а не только .ts/.tsx.
-  const RENDER_EXTENSIONS = ['.ts', '.tsx', '.js', '.mjs']
-  const renderFiles = listFiles(join(ROOT, 'src/render')).filter(
-    (f) => RENDER_EXTENSIONS.some((ext) => f.endsWith(ext)) && f !== chokepoint,
+  // src/core исключён намеренно, а не по забывчивости: это старая логика
+  // run-game, и level.js/train.js уже напрямую импортируют view.js/preview.js
+  // в самом run-game — та же проводка приезжает сюда копией и остаётся
+  // законной (решение и его цена — в спеке, раздел «Что переносится...»).
+  // Стык закрывает НОВЫЙ код: comment и решение говорят «нигде», и раньше
+  // область была уже src/render, хотя src/shell/** и src/adapters/** ничем
+  // не были защищены — область расширена на весь src/ кроме src/core.
+  const core = join(ROOT, 'src/core')
+  const SCOPED_EXTENSIONS = ['.ts', '.tsx', '.js', '.mjs']
+  const scopedFiles = listFiles(join(ROOT, 'src')).filter(
+    (f) =>
+      SCOPED_EXTENSIONS.some((ext) => f.endsWith(ext)) &&
+      f !== chokepoint &&
+      !f.startsWith(core + sep),
   )
 
   const violations: string[] = []
-  for (const file of renderFiles) {
-    if (IMPORTS_OLD_RENDERER.test(readFileSync(file, 'utf8'))) {
+  for (const file of scopedFiles) {
+    const specs = extractImportSpecifiers(readFileSync(file, 'utf8'))
+    if (specs.some(isOldRendererSpecifier)) {
       violations.push(file)
     }
   }
