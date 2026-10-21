@@ -142,6 +142,80 @@ async function loadCounters() {
 }
 
 /**
+ * Расписание одного забега: препятствия, кольца и обочина для тройки
+ * (мир, посев, ступень).
+ *
+ * ЕДИНСТВЕННЫЙ владелец порядка вызовов генераторов. Порядок здесь — не
+ * стиль: все трое тянут из одного `rng`, и переставь их местами — получится
+ * другой забег при том же посеве. Отсюда и функция: перебор ниже и
+ * восстановление отдельного кадра (`sceneAt`) обязаны получать ОДИН И ТОТ ЖЕ
+ * забег, иначе «худший кадр» и кадр, который потом разглядывают, окажутся
+ * разными кадрами — молча.
+ */
+export function runOf(world, seed, step) {
+  const rng = seeded(seed)
+  const tune = tuneFor(step)
+  const prizes = unlockedAt(FULL_BANK)
+  /* МИР едет и в генератор препятствий: у каждого мира своя пара
+     внешностей, и без этого параметра перебор мерил бы четыре мира
+     фигурами холмов. */
+  const obstacles = makeLevel({ durationS: DURATION_S, rng, tune, world })
+  const stars = makeStars({ durationS: DURATION_S, obstacles, rng, tune })
+  const decor = makeDecor({ durationS: DURATION_S, rng, world, prizes, speed: tune.speed })
+  return { obstacles, stars, decor, tune, prizes }
+}
+
+/**
+ * Состояние забега на секунде `t`. Тоже единственный владелец: описание
+ * кадра целиком зависит от того, какие поля сюда положены, и вторая копия
+ * этого объекта означала бы второй кадр с тем же названием.
+ */
+export function stateAt(run, world, step, t) {
+  return {
+    decor: run.decor,
+    obstacles: run.obstacles,
+    stars: run.stars,
+    /* Боковая скорость тела, а не ход коридора: ход берётся у ступени
+       (`tuneFor(step).speed`) внутри `composeScene`. На состав кадра это
+       число не влияет вовсе, и записано оно ради того, чтобы состояние было
+       настоящим, а не урезанным под счётчик. */
+    speed: 0.5,
+    u: t % 2 < 1 ? 1 : -1,
+    v: 0,
+    travel: t * run.tune.speed,
+    elapsed: t,
+    /* Зона — та же, что была бы в игре: формы обочины у зон свои, и небо
+       кадра берётся по ней же. */
+    zone: zoneAt(t, DURATION_S, world),
+    prizes: run.prizes,
+    finishIn: DURATION_S - t,
+    safe: true,
+    pulse: 0,
+    dim: 0,
+    world,
+    durationS: DURATION_S,
+    step,
+  }
+}
+
+/**
+ * Описание ОДНОГО кадра по его привязке `{world, seed, step, atS}` — ровно
+ * той, которую отдаёт `worstFrame`.
+ *
+ * Нужно это затем, чтобы худший кадр можно было не только посчитать, но и
+ * разглядеть: трёхмерный вывод сверяет на нём живой счёт с оценкой
+ * (`tests/three-build.test.ts`). Пересобирается он теми же `runOf` и
+ * `stateAt`, которыми шёл перебор, поэтому «тот самый кадр» — это свойство
+ * кода, а не надежда; тест вдобавок сверяет восстановленный кадр с числами
+ * перебора.
+ */
+export async function sceneAt(where, deps = {}) {
+  const compose = deps.composeScene ?? (await loadCounters()).composeScene
+  const run = runOf(where.world, where.seed, where.step)
+  return compose(stateAt(run, where.world, where.step, where.atS))
+}
+
+/**
  * Худший кадр одного мира.
  *
  * Возвращаются МАКСИМУМЫ по каждому числу отдельно, а не четыре числа одного
@@ -160,7 +234,6 @@ export async function worstFrame(world, assets, deps = {}) {
   const estimate = deps.estimateFrame ?? loaded.estimateFrame
   const backdrop = deps.backdropAssets ?? loaded.backdropAssets
 
-  const prizes = unlockedAt(FULL_BANK)
   const best = {
     world,
     frames: 0,
@@ -193,20 +266,7 @@ export async function worstFrame(world, assets, deps = {}) {
 
   for (const seed of SEEDS) {
     for (let step = 0; step <= STEP_MAX; step++) {
-      const rng = seeded(seed)
-      const tune = tuneFor(step)
-      /* МИР едет и в генератор препятствий: у каждого мира своя пара
-         внешностей, и без этого параметра перебор мерил бы четыре мира
-         фигурами холмов. */
-      const obstacles = makeLevel({ durationS: DURATION_S, rng, tune, world })
-      const stars = makeStars({ durationS: DURATION_S, obstacles, rng, tune })
-      const decor = makeDecor({
-        durationS: DURATION_S,
-        rng,
-        world,
-        prizes,
-        speed: tune.speed,
-      })
+      const run = runOf(world, seed, step)
 
       for (let t = 0; t < DURATION_S; t += FRAME_STEP_S) {
         /* Кольца НЕ помечаются собранными, и это оценка СВЕРХУ, а не
@@ -214,31 +274,7 @@ export async function worstFrame(world, assets, deps = {}) {
            пометить ближайшее было дороже; здесь собранное кольцо просто
            исчезает из описания (`placeStar` отдаёт `null`), то есть любая
            пометка делает кадр ЛЕГЧЕ правды. */
-        const scene = compose({
-          decor,
-          obstacles,
-          stars,
-          /* Боковая скорость тела, а не ход коридора: ход берётся у ступени
-             (`tuneFor(step).speed`) внутри `composeScene`. На состав кадра
-             это число не влияет вовсе, и записано оно ради того, чтобы
-             состояние было настоящим, а не урезанным под счётчик. */
-          speed: 0.5,
-          u: t % 2 < 1 ? 1 : -1,
-          v: 0,
-          travel: t * tune.speed,
-          elapsed: t,
-          /* Зона — та же, что была бы в игре: формы обочины у зон свои, и
-             небо кадра берётся по ней же. */
-          zone: zoneAt(t, DURATION_S, world),
-          prizes,
-          finishIn: DURATION_S - t,
-          safe: true,
-          pulse: 0,
-          dim: 0,
-          world,
-          durationS: DURATION_S,
-          step,
-        })
+        const scene = compose(stateAt(run, world, step, t))
 
         const b = estimate(scene, assets)
         const where = { zone: scene.zone, seed, step, atS: t }
