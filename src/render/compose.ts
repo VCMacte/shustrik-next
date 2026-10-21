@@ -9,7 +9,7 @@
 import { OBSTACLES, VIEW } from '../core/config.js'
 import { tuneFor } from '../core/difficulty.js'
 import { obstacleEdge } from './numbers'
-import { DRAW_FAR_M } from './types'
+import { CORRIDOR_H_M, CROUCH_PITCH_GAIN, DRAW_FAR_M } from './types'
 import type { Decor, FrameScene, Obstacle, Placement, RunState, Star } from './types'
 
 /**
@@ -28,6 +28,21 @@ const DUCK_H_M = OBSTACLES.duckHeight
  * числа про дальность в проекте быть не должно.
  */
 const FADE_BAND_M = DRAW_FAR_M * 0.25
+
+/**
+ * Обочина отсекается БЛИЖЕ остального, доля от общей дальности.
+ *
+ * Не вкус и не экономия на глаз: старый вывод рисовал её до `far * 0.75`,
+ * то есть до 22 метров (`view.js:866`), и именно на этой дальности считаны
+ * обещания про границу зон. Полная дальность дала бы на треть больше
+ * обочины в кадре — а это прямо в потолок «вызовов < 150», и обнаружил бы
+ * его бюджет, а не этот файл. Доля от `DRAW_FAR_M`, а не второе число:
+ * владелец дальности один.
+ *
+ * Чего здесь НЕТ: потолка в 18 элементов (`DECOR_MAX`, `view.js:854`). Это
+ * потолок Canvas2D-отрисовки, и нужен ли он новому выводу — покажет Task 5.
+ */
+const DECOR_FAR_M = DRAW_FAR_M * 0.75
 
 /** 1 у ног, 0 на горизонте. Обоим способам вывода подходит одинаково. */
 function fadeAt(z: number): number {
@@ -64,12 +79,16 @@ function placeObstacle(ob: Obstacle, elapsed: number, speed: number): Placement 
 
   if (ob.kind === 'duck') {
     /* Верхнее препятствие висит поперёк всего коридора: уклоняться некуда,
-       проводит под ним присед. Середина полотна — между щелью и потолком. */
+       проводит под ним присед. Полотно идёт от щели (`duckHeight`) до верха
+       стены, его высота — ровно `CORRIDOR_H_M − duckHeight` (так и в
+       `view.js:1428`), а `y` — середина полотна, потому что оно висит, а не
+       стоит на полу. */
     return {
       asset: `obstacle/${ob.look}`,
       x: 0,
-      y: DUCK_H_M + (VIEW.corridorWidth - DUCK_H_M) / 2,
+      y: DUCK_H_M + (CORRIDOR_H_M - DUCK_H_M) / 2,
       z,
+      scale: CORRIDOR_H_M - DUCK_H_M,
       fade: fadeAt(z),
     }
   }
@@ -101,16 +120,20 @@ function placeStar(s: Star, elapsed: number, speed: number): Placement | null {
 
 function placeDecor(d: Decor, elapsed: number, speed: number): Placement | null {
   const z = depthOf(d.at, elapsed, speed)
-  if (!visible(z)) return null
+  if (z < 0 || z > DECOR_FAR_M) return null
   return {
-    /* Зона хранится у САМОГО элемента, а не берётся у кадра: иначе на
-       границе зон обочина следующей зоны пять секунд видна в цветах
-       предыдущей (разбор — у `makeDecor`, `view.js:2478`). */
-    asset: `decor/${d.zone}/${d.kind}`,
+    /* Имя — только вид, без зоны: один и тот же `kind` живёт в нескольких
+       зонах с той же геометрией, а различается палитрой (разбор — в договоре
+       об именах у `AssetId`). */
+    asset: `decor/${d.kind}`,
     x: d.x,
     y: d.y,
     z,
     scale: d.h,
+    /* Зона хранится у САМОГО элемента, а не берётся у кадра: иначе на
+       границе зон обочина следующей зоны видна в цветах предыдущей (разбор —
+       у `makeDecor`, `view.js:2480`). */
+    tint: d.zone,
     fade: fadeAt(z),
   }
 }
@@ -143,9 +166,11 @@ export function composeScene(state: RunState): FrameScene {
   return {
     zone: state.zone,
     world: state.world,
-    /* Наклон взгляда — доля приседа, а не градусы: чем именно повернётся
-       камера, решает способ вывода, а описание говорит только «насколько». */
-    camera: { u: state.u, pitch: state.v * VIEW.pitchGain },
+    /* Доля, а не градусы: чем именно ответит камера — опусканием глаз или
+       наклоном, — решает способ вывода. Множитель СВОЙ (`CROUCH_PITCH_GAIN`),
+       а не `VIEW.pitchGain`: у того чужой смысл — он масштабирует высоту
+       глаз (`view.js:125`). */
+    camera: { u: state.u, pitch: state.v * CROUCH_PITCH_GAIN },
     placements,
   }
 }

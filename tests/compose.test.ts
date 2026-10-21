@@ -11,6 +11,7 @@ import { composeScene } from '../src/render/compose'
 import { DRAW_FAR_M } from '../src/render/types'
 import type { Decor, Obstacle, RunState, Star } from '../src/render/types'
 import { tuneFor } from '../src/core/difficulty.js'
+import { OBSTACLES } from '../src/core/config.js'
 
 /** Ступень сложности образца. Скорость коридора берётся по ней, и только по ней. */
 const STEP = 1
@@ -78,6 +79,28 @@ test('препятствие стоит на своей стороне и на �
      ход коридора у обеих формул одинаковый, а вот место препятствия — нет. */
   expect(p!.z).toBeCloseTo((12 - 2) * speedOf(STEP), 2)
   expect(Math.sign(p!.x)).toBe(-1)
+})
+
+test('верхнее препятствие висит от щели до верха стены', () => {
+  const s = composeScene(
+    stateWith({
+      obstacles: [obstacle({ at: 4, kind: 'duck', side: 0, look: 'beam' })],
+      elapsed: 0,
+    }),
+  )
+  const p = s.placements.find((p) => p.asset === 'obstacle/beam')
+  expect(p).toBeDefined()
+  // Уклоняться некуда: полотно идёт поперёк всего коридора.
+  expect(p!.x).toBe(0)
+  /* Проверяются КРАЯ полотна, а не его середина: середину легко повторить
+     той же формулой, что в коде, и тогда проверка перестанет что-либо знать.
+     Низ обязан совпасть со щелью, под которой проходит присед
+     (`OBSTACLES.duckHeight`), верх — с верхом стены (`view.js:29`, WALL = 2.6).
+     Прежняя редакция брала за потолок ШИРИНУ коридора (2.4) и давала верх
+     1.725 + 0.675 = 2.4 — вот ровно это здесь и ловится. */
+  const half = (p!.scale ?? 1) / 2
+  expect(p!.y - half).toBeCloseTo(OBSTACLES.duckHeight, 3)
+  expect(p!.y + half).toBeCloseTo(2.6, 3)
 })
 
 test('кольцо дальше горизонта не размещается вовсе', () => {
