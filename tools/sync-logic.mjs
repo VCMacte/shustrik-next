@@ -142,6 +142,11 @@ function main() {
 // pathToFileURL кодирует путь (пробелы -> %20) так же, как делает Node для
 // import.meta.url — прямая сборка строки `file://${argv[1]}` расходится с
 // ней на путях с пробелами (частый случай на Windows) и main() не запускался.
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// `process.argv[1] &&` обязателен: модуль импортируют (тест импортирует
+// checkAgainst), а не только запускают из командной строки, и в хосте, где
+// argv[1] не определён (ESM-импорт через --input-type=module/-e, встраивание
+// в другой инструмент), pathToFileURL(undefined) падает уже на СТАДИИ import
+// — модуль не имеет права взрываться при подключении.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main()
 }
