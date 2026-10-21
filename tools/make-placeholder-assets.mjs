@@ -266,24 +266,23 @@ function merge(parts) {
 /** @typedef {{width:number,height:number,format:'rgba8'|'astc4x4',mipmaps:boolean}} TexSpec */
 
 const TEX = {
-  obstacle: { width: 512, height: 512, format: 'rgba8', mipmaps: true },
-  star: { width: 256, height: 256, format: 'rgba8', mipmaps: true },
-  decor: { width: 256, height: 256, format: 'rgba8', mipmaps: true },
-  floor: { width: 1024, height: 1024, format: 'rgba8', mipmaps: true },
-  walls: { width: 1024, height: 512, format: 'rgba8', mipmaps: true },
-  // Небо широкое и низкое: полоса обходит горизонт. Байтов столько же,
-  // сколько у квадрата 1024², а пропорция естественная.
-  sky: { width: 2048, height: 512, format: 'rgba8', mipmaps: true },
+  /* Числа НЕ выбраны здесь: это размеры текстур, которые автор уже
+     сгенерировал, — небо 1024×512, предметы 512×512. Таблица их
+     ОБЪЯВЛЯЕТ, а сторож в `tests/asset-stat.test.ts` сверяет объявленное с
+     заголовком IHDR каждого PNG, который лежит на диске. Поэтому вторым
+     местом правды она не становится: разойдётся — упадёт. */
+  object: { width: 512, height: 512, format: 'rgba8', mipmaps: true },
+  sky: { width: 1024, height: 512, format: 'rgba8', mipmaps: true },
 }
 
 export const ASSET_CLASSES = {
   /** Боковая плита и всё, что стоит сбоку: коробка, один материал. */
-  obstacleSide: { geometry: () => box(), tex: TEX.obstacle },
+  obstacleSide: { geometry: () => box(), tex: TEX.object },
   /**
    * Полотно поперёк коридора. Призма, а не коробка: у висящего полотна
    * ребёнок читает нижнюю кромку, и скошенная грань даёт ей светлоту.
    */
-  obstacleDuck: { geometry: () => prism({ sides: 3, h: 1 }), tex: TEX.obstacle },
+  obstacleDuck: { geometry: () => prism({ sides: 3, h: 1 }), tex: TEX.object },
   /**
    * НАМЕРЕННО самый дорогой ассет: тело плюс оболочка свечения, два
    * материала — то есть ДВА вызова с одного меша. Он здесь ровно затем,
@@ -293,20 +292,20 @@ export const ASSET_CLASSES = {
   obstacleJelly: {
     geometry: () => box(),
     glow: () => box({ w: 1.08, h: 1.04, d: 1.08 }),
-    tex: TEX.obstacle,
+    tex: TEX.object,
   },
   /** Обычное кольцо. */
-  starRing: { geometry: () => torus({ radial: 12, tubular: 6 }), tex: TEX.star },
+  starRing: { geometry: () => torus({ radial: 12, tubular: 6 }), tex: TEX.object },
   /** Большое кольцо: отдельный ассет, форма различима, сегментов больше. */
-  starBig: { geometry: () => torus({ radial: 16, tubular: 8, r: 0.44, tube: 0.13 }), tex: TEX.star },
+  starBig: { geometry: () => torus({ radial: 16, tubular: 8, r: 0.44, tube: 0.13 }), tex: TEX.object },
   /** Растительность: скрещённые плоскости, восемь вершин. */
-  decorPlant: { geometry: () => crossQuads(), tex: TEX.decor },
+  decorPlant: { geometry: () => crossQuads(), tex: TEX.object },
   /** Камни, кристаллы, столбы: призма. */
-  decorSolid: { geometry: () => prism({ sides: 5 }), tex: TEX.decor },
+  decorSolid: { geometry: () => prism({ sides: 5 }), tex: TEX.object },
   /** Светлячок: маленький купол. */
-  decorGlow: { geometry: () => dome({ segments: 8, rings: 3 }), tex: TEX.decor },
+  decorGlow: { geometry: () => dome({ segments: 8, rings: 3 }), tex: TEX.object },
   /** Пол коридора: одна лежачая плоскость, тайлится текстурой. */
-  corridorFloor: { geometry: () => quad({ plane: 'xz' }), tex: TEX.floor },
+  corridorFloor: { geometry: () => quad({ plane: 'xz' }), tex: TEX.object },
   /** Две стены — один примитив: один материал, один вызов. */
   corridorWalls: {
     geometry: () =>
@@ -314,7 +313,7 @@ export const ASSET_CLASSES = {
         quad({ plane: 'xy', yaw: Math.PI / 2 }),
         quad({ plane: 'xy', yaw: -Math.PI / 2 }),
       ]),
-    tex: TEX.walls,
+    tex: TEX.object,
   },
   /** Небо: перевёрнутая полоса. */
   sky: { geometry: () => cylinderBand({ segments: 24 }), tex: TEX.sky },
@@ -399,17 +398,36 @@ export function assetIds() {
   ]
 }
 
+/**
+ * Ссылка на картинку ИЗ `.glb`, а не из корня проекта.
+ *
+ * Тонкость, которая уже один раз стоила 44 битых ссылок из 44: `uri` в glTF
+ * разрешается относительно каталога САМОГО `.glb`, а не относительно корня
+ * комплекта. `assets/obstacle/jelly.glb` лежит на уровень глубже, чем
+ * `assets/tex/`, значит ссылка обязана начинаться с `../` — иначе загрузчик
+ * ищет `assets/obstacle/tex/obstacle/jelly.png`. Число `../` выводится из
+ * самого имени: сколько в имени косых черт, столько уровней вглубь.
+ *
+ * Своей проверки это не заменяет: сторож в тесте обходит РЕАЛЬНЫЕ `.glb` на
+ * диске и разрешает каждую ссылку файловой системой. Круговой тест такое не
+ * ловит в принципе — писатель и счётчик ошибаются одинаково и сходятся.
+ */
+function texUri(imageId) {
+  const depth = imageId.split('/').length - 1
+  return `${'../'.repeat(depth)}tex/${imageId}.png`
+}
+
 /** Имя ассета → вход для `buildGlb`. */
 export function specFor(id) {
   const cls = ASSET_CLASSES[ASSET_CLASS_OF(id)]
   if (!cls) throw new Error(`нет класса сложности у ассета ${id}`)
 
-  const images = [{ name: id, uri: `tex/${id}.png`, ...cls.tex }]
+  const images = [{ name: id, uri: texUri(id), ...cls.tex }]
   const materials = [{ name: 'body', image: 0 }]
   const primitives = [{ geometry: cls.geometry(), material: 0 }]
 
   if (cls.glow) {
-    images.push({ name: `${id}-glow`, uri: `tex/${id}-glow.png`, ...cls.tex })
+    images.push({ name: `${id}-glow`, uri: texUri(`${id}-glow`), ...cls.tex })
     materials.push({ name: 'glow', image: 1 })
     primitives.push({ geometry: cls.glow(), material: 1 })
   }

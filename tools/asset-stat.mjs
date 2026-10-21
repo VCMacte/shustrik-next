@@ -53,20 +53,21 @@ const BYTES_PER_PIXEL = {
 }
 
 /**
- * Разбирает `.glb` и отдаёт то, и только то, по чему судит бюджет.
+ * JSON-чанк контейнера, разобранный и проверенный.
+ *
+ * Отдельно от `readGlbStats`, потому что про `.glb` нужно знать не только
+ * бюджетное: сторож ссылок на картинки читает `images[].uri`, а второго
+ * разборщика контейнера в проекте быть не должно — он разошёлся бы с первым
+ * молча, как и всякая вторая копия здесь.
  *
  * @param {Buffer|Uint8Array} input
- * @returns {{
- *   primitives: {material: string, verts: number}[],
- *   textures: {name: string, width: number, height: number, format: string, mipmaps: boolean}[],
- * }}
  */
-export function readGlbStats(input) {
+export function readGlbJson(input) {
   const buf = Buffer.isBuffer(input) ? input : Buffer.from(input)
 
-  // Все три отказа ниже — ЯВНЫЕ и названные. «Не glTF» молча, с нулём
-  // вершин, сделало бы бюджет тем оптимистичнее, чем больше в сцене
-  // испорченных файлов (Review Focus, Task 4).
+  // Все отказы ниже — ЯВНЫЕ и названные. «Не glTF» молча, с нулём вершин,
+  // сделало бы бюджет тем оптимистичнее, чем больше в сцене испорченных
+  // файлов (Review Focus, Task 4).
   if (buf.length < 12) throw new Error('не glTF: файл короче заголовка')
   if (buf.readUInt32LE(0) !== GLTF_MAGIC) throw new Error('не glTF: нет подписи glTF')
   const version = buf.readUInt32LE(4)
@@ -86,12 +87,24 @@ export function readGlbStats(input) {
     throw new Error(`битый glTF: JSON-чанк длиной ${chunkLen} не влезает в файл`)
   }
 
-  let json
   try {
-    json = JSON.parse(buf.toString('utf8', 20, 20 + chunkLen))
+    return JSON.parse(buf.toString('utf8', 20, 20 + chunkLen))
   } catch (e) {
     throw new Error(`битый glTF: JSON-чанк не разбирается (${e.message})`)
   }
+}
+
+/**
+ * Разбирает `.glb` и отдаёт то, и только то, по чему судит бюджет.
+ *
+ * @param {Buffer|Uint8Array} input
+ * @returns {{
+ *   primitives: {material: string, verts: number}[],
+ *   textures: {name: string, width: number, height: number, format: string, mipmaps: boolean}[],
+ * }}
+ */
+export function readGlbStats(input) {
+  const json = readGlbJson(input)
 
   const accessors = json.accessors ?? []
   const materials = json.materials ?? []
@@ -144,8 +157,14 @@ export function manifestEntry(stats) {
   }
 }
 
-/** Все `.glb` под `dir`, рекурсивно. Возвращает имена ассетов (без `.glb`). */
-function listGlb(dir, prefix = '') {
+/**
+ * Все `.glb` под `dir`, рекурсивно. Возвращает имена ассетов (без `.glb`).
+ *
+ * Экспортируется затем, чтобы сторож ссылок обходил ФАЙЛЫ НА ДИСКЕ, а не
+ * таблицу в коде: таблица один раз уже была неправа (44 битые ссылки из 44),
+ * и тест, выведенный из неё, повторил бы ту же ошибку.
+ */
+export function listGlb(dir, prefix = '') {
   const out = []
   for (const entry of readdirSync(dir).sort()) {
     const full = join(dir, entry)
