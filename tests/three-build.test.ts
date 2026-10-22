@@ -951,9 +951,12 @@ test('содержимое кадра стоит перед камерой, а �
   const halfV = ((camera.fov * Math.PI) / 180) / 2
   const halfH = HFOV_RAD / 2
 
-  /** Центры всех инстансов кадра в системе координат КАМЕРЫ. */
+  /** Центры инстансов РАЗМЕЩЕНИЙ в системе координат КАМЕРЫ. */
   const seen: Array<{ x: number; y: number; z: number }> = []
-  renderer.root().traverse((o) => {
+  const placements = (renderer.root() as any).children
+    .find((g: any) => g.name === 'placements')
+  expect(placements).toBeTruthy()
+  placements.traverse((o: any) => {
     const mesh = o as any
     if (!mesh.isInstancedMesh) return
     mesh.updateMatrixWorld(true)
@@ -968,13 +971,11 @@ test('содержимое кадра стоит перед камерой, а �
     }
   })
 
-  expect(seen.length).toBeGreaterThan(0)
-  /* Постоянная часть кадра (пол, стены, небо) стоит в начале координат по
-     построению — `backdropPlacements` отдаёт всем `x: 0, y: 0, z: 0`, а
-     вперёд её тянет собственная геометрия ассета. Судить о направлении
-     взгляда по ней нельзя, поэтому берутся РАЗМЕЩЕНИЯ. */
-  const placed = seen.filter((p) => p.z !== 0)
-  expect(placed).toHaveLength(1)
+  /* Берутся именно РАЗМЕЩЕНИЯ: у постоянной части центр уезжает на
+     половину дальности по своей причине, и направление взгляда по нему не
+     читается. */
+  expect(seen).toHaveLength(1)
+  const placed = seen
 
   /* Перед камерой — это ОТРИЦАТЕЛЬНЫЙ `z` в её системе: three.js смотрит в
      −Z, а описание держит «вперёд» положительным. */

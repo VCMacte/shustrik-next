@@ -26,12 +26,16 @@ import {
   CEILING_VERTS,
   SOFT_CALLS,
   backdropAssets,
+  backdropGeometry,
+  backdropPlacements,
   estimate,
   estimateFrame,
   estimateWithoutInstancing,
 } from '../src/render/estimate'
 import type { AssetTable } from '../src/render/estimate'
 import type { FrameScene, Placement } from '../src/render/types'
+import { CORRIDOR_H_M, DRAW_FAR_M } from '../src/render/types'
+import { VIEW } from '../src/core/config.js'
 import { WORLDS, worldReady } from '../src/core/theme.js'
 import { DURATION_S, FRAME_STEP_S, SEEDS, measuredWorlds, worstFrame } from '../tools/budget.mjs'
 import { STEP_MAX } from '../src/core/difficulty.js'
@@ -374,4 +378,72 @@ test('потолки — те, что записаны заранее', () => {
   expect(SOFT_CALLS).toBe(100)
   expect(CEILING_VERTS).toBe(100_000)
   expect(CEILING_TEX_BYTES).toBe(96 * 1024 * 1024)
+})
+
+// ───────── габариты постоянной части кадра ──────────────────────────────
+
+/**
+ * Пол, стены и небо не вправе остаться метровыми.
+ *
+ * Куплено снимком экрана. Постоянная часть ехала с `{ x: 0, y: 0, z: 0 }` и
+ * без `size`, а заглушки нормированы в единицу, — значит коридор рисовался
+ * метровым квадратом под ногами. Для ЗАМЕРА это хуже, чем для вида: пол и
+ * стены дают основную закраску, и кадр без них даёт ОПТИМИСТИЧНЫЙ `gap95`,
+ * то есть ошибается ровно в ту сторону, которая ложно выигрывает развилку
+ * за полное 3D.
+ *
+ * Прошла бы вхолостую? НЕТ: убери `size` у любой из трёх частей — падает
+ * либо проверка габарита, либо «ни одна часть не осталась единичной».
+ * Проверяется при этом СВЯЗЬ С ВЛАДЕЛЬЦАМИ чисел (`VIEW.corridorWidth`,
+ * `CORRIDOR_H_M`, `DRAW_FAR_M`), а не переписанные в тест литералы: вторая
+ * копия числа разошлась бы с первой молча.
+ */
+test('постоянная часть кадра размером во всю сцену, а не в один метр', () => {
+  const placements = backdropPlacements({ zone: 'greenHill' })
+  expect(placements.map((p) => p.asset)).toEqual(backdropAssets({ zone: 'greenHill' }))
+
+  const by = (id: string): Placement => {
+    const p = placements.find((x) => x.asset === id)
+    if (!p) throw new Error(`в постоянной части нет ${id}`)
+    return p
+  }
+
+  const floor = by('corridor/floor')
+  expect(floor.size?.w).toBe(VIEW.corridorWidth)
+  expect(floor.size?.d).toBe(DRAW_FAR_M)
+  // Пол лежит ПЕРЕД камерой: полоса от нуля до рубежа отсечения.
+  expect(floor.z - DRAW_FAR_M / 2).toBeCloseTo(0, 6)
+
+  const walls = by('corridor/walls')
+  expect(walls.size?.w).toBe(VIEW.corridorWidth)
+  expect(walls.size?.h).toBe(CORRIDOR_H_M)
+  expect(walls.size?.d).toBe(DRAW_FAR_M)
+
+  // Небо охватывает сцену: радиус не меньше дальности отсечения.
+  const sky = by('sky/greenHill')
+  expect((sky.size?.w ?? 1) / 2).toBeGreaterThanOrEqual(DRAW_FAR_M)
+  expect((sky.size?.d ?? 1) / 2).toBeGreaterThanOrEqual(DRAW_FAR_M)
+  expect(sky.size?.h ?? 1).toBeGreaterThanOrEqual(DRAW_FAR_M)
+
+  /* И ни одна часть не осталась «натуральным метром» ни по одной оси, где
+     габарит осмыслен. Пол — плоскость в XZ, высоты у него нет вовсе, и
+     требовать её значило бы придумать толщину. */
+  for (const p of placements) {
+    const axes = p.asset === 'corridor/floor' ? ['w', 'd'] : ['w', 'h', 'd']
+    for (const axis of axes) {
+      expect((p.size as Record<string, number> | undefined)?.[axis]).toBeGreaterThan(1)
+    }
+  }
+})
+
+/**
+ * Четвёртая постоянная часть обязана получить габарит РЕШЕНИЕМ, а не
+ * умолчанием. Прошла бы вхолостую? НЕТ: замени `throw` на возврат
+ * `{ x: 0, y: 0, z: 0 }` — и `toThrow` падает, а метровая беда возвращается
+ * молча, как в первый раз.
+ */
+test('незнакомая постоянная часть падает громко, а не достаётся умолчанию', () => {
+  expect(() => backdropPlacements({ zone: 'нет-такой-зоны' })).not.toThrow()
+  // Небо узнаётся по префиксу; всё прочее обязано быть названо явно.
+  expect(() => backdropGeometry('corridor/ceiling')).toThrow(/габарит/)
 })

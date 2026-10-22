@@ -17,8 +17,8 @@ import { VIEW } from '../../core/config.js'
 import { CROUCH_PITCH_GAIN, DRAW_FAR_M } from '../types'
 import type { FrameScene } from '../types'
 import { cameraX } from '../numbers'
+import { backdropPlacements } from '../estimate'
 import {
-  backdropPlacements,
   build3D,
   buildBackdrop,
   forgetMaterials,

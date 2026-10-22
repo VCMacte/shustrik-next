@@ -16,7 +16,7 @@
  */
 import * as THREE from 'three'
 
-import { backdropAssets } from '../estimate'
+import { backdropAssets, backdropPlacements } from '../estimate'
 import type { AssetId, FrameScene, Placement } from '../types'
 
 /**
@@ -310,11 +310,6 @@ export function buildBackdrop(scene: FrameScene, assets: LoadedAssets): THREE.Gr
   group.name = 'backdrop'
   for (const p of backdropPlacements(scene)) addInstanced(group, p.asset, [p], assets)
   return group
-}
-
-/** Постоянная часть кадра как список размещений — по одному на ассет. */
-export function backdropPlacements(scene: FrameScene): Placement[] {
-  return backdropAssets(scene).map((asset) => ({ asset, x: 0, y: 0, z: 0 }))
 }
 
 /**
