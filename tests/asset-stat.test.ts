@@ -24,7 +24,8 @@
  * самих заглушек `assets/**.glb` и текстур `assets/tex/**.png`, которые и есть
  * предмет проверки.
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { expect, test } from 'vitest'
 
@@ -33,6 +34,7 @@ import {
   assetSpecs,
   box,
   buildGlb,
+  cylinderBand,
   torus,
 } from '../tools/make-placeholder-assets.mjs'
 import {
@@ -558,3 +560,120 @@ test('больше одной карты — только у obstacle/jelly, и 
      ассет не вправе молча. Сейчас он один, и он намеренный. */
   expect(multi).toEqual(['obstacle/jelly'])
 })
+
+/**
+ * Полоса неба обойдена ВНУТРЬ: лицевые грани смотрят на зрителя.
+ *
+ * Куплено снимком экрана. Прежний порядок обхода давал лицевые грани
+ * наружу, и небо изнутри отсекалось целиком — над коридором было черно.
+ * Комментарий в генераторе при этом утверждал обратное: он описывал
+ * НАМЕРЕНИЕ, а проверить его было нечем, потому что на вывод до страницы
+ * спайка никто не смотрел.
+ *
+ * Считается ровно то, на что смотрит видеокарта: нормаль ПО ОБХОДУ
+ * (`(B−A) × (C−A)`), а не записанный в файл атрибут — отсечение задней
+ * стороны атрибут не читает. Нормаль обязана указывать к оси полосы, то
+ * есть иметь отрицательную проекцию на радиус.
+ *
+ * Прошла бы вхолостую? НЕТ: верни прежний порядок `a, a+1, a+2` — обе
+ * проверки падают.
+ */
+test('полоса неба обойдена внутрь, иначе небо есть, но его нет', () => {
+  const band = cylinderBand({ segments: 8 })
+  const at = (i: number): [number, number, number] => [
+    band.positions[i * 3], band.positions[i * 3 + 1], band.positions[i * 3 + 2],
+  ]
+
+  let checked = 0
+  for (let t = 0; t < band.indices.length; t += 3) {
+    const [a, b, c] = [at(band.indices[t]), at(band.indices[t + 1]), at(band.indices[t + 2])]
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+    const v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
+    const n = [
+      u[1] * v[2] - u[2] * v[1],
+      u[2] * v[0] - u[0] * v[2],
+      u[0] * v[1] - u[1] * v[0],
+    ]
+    // Радиус в точке A (ось полосы вертикальна, поэтому только x и z).
+    const dot = n[0] * a[0] + n[2] * a[2]
+    expect(dot).toBeLessThan(0)
+    checked++
+  }
+  // Треугольников должно быть по два на сегмент: пустой обход прошёл бы молча.
+  expect(checked).toBe(16)
+})
+
+// ───────── комплект в СОБРАННОЙ странице, а не только в дереве ──────────
+
+/** Все файлы под `dir`, рекурсивно. Отдельно от `listGlb`: тот берёт только `.glb`. */
+function listFilesIn(dir: string): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry)
+    if (statSync(full).isDirectory()) out.push(...listFilesIn(full))
+    else out.push(full)
+  }
+  return out
+}
+
+/**
+ * После `vite build` в `dist/` обязаны лежать ВСЕ `.glb` и все текстуры, на
+ * которые они ссылаются.
+ *
+ * Куплено разбором, а не воображением. `dist/` не содержал ни одного
+ * ассета: вывод грузит их по `assets/<id>.glb` от корня сайта, а корневой
+ * `assets/` не лежал в `public/` и ничем не копировался. В `npm run dev`
+ * этого не видно — там Vite отдаёт файлы прямо от корня проекта, и коридор
+ * рисуется; падает ровно то, что человек повезёт к штативу: собранная
+ * страница даёт 404 на первом же `loadAsync`, и все четыре прогона говорят
+ * «не запустился».
+ *
+ * Сторож ДИСКОВЫЙ, как три соседних выше, и по той же причине: список в
+ * коде согласован сам с собой по определению. Здесь спрашивается файловая
+ * система — сначала про `assets/`, потом про собранное, — и сверяются два
+ * ответа внешнего мира, а не ответ со списком.
+ *
+ * Сборка настоящая, тем же `vite build`, что у человека. Выход уводится во
+ * временный каталог: прогон не вправе затирать `dist/`, который кто-то мог
+ * только что собрать для выезда.
+ *
+ * Прошла бы вхолостую? НЕТ: убери плагин `bundleAssets` из
+ * `vite.config.ts` — падает на первом же `.glb`.
+ */
+test('собранная страница самодостаточна: весь комплект лежит в dist', async () => {
+  const { build } = await import('vite')
+  const out = mkdtempSync(join(tmpdir(), 'shustrik-dist-'))
+  try {
+    await build({ root: ROOT, logLevel: 'error', build: { outDir: out, emptyOutDir: true } })
+
+    const glbs = listGlb(join(ROOT, 'assets'))
+    expect(glbs.length).toBeGreaterThan(0)
+
+    /** Текстуры, на которые ссылаются сами контейнеры, — путями от `assets/`. */
+    const textures = new Set<string>()
+    for (const { id, file } of glbs) {
+      expect(existsSync(join(out, 'assets', `${id}.glb`)), `нет dist/assets/${id}.glb`).toBe(true)
+      for (const image of readGlbJson(readFileSync(file)).images ?? []) {
+        /* `uri` разрешается от каталога САМОГО `.glb` — так его читает
+           загрузчик, и так же обязан читать сторож. Разрешить иначе значило
+           бы проверить не тот файл. */
+        const abs = resolve(dirname(file), image.uri)
+        textures.add(relative(join(ROOT, 'assets'), abs).split(sep).join('/'))
+      }
+    }
+
+    expect(textures.size).toBeGreaterThan(0)
+    for (const rel of textures) {
+      expect(existsSync(join(out, 'assets', rel)), `нет dist/assets/${rel}`).toBe(true)
+    }
+
+    /* И НИ ОДНОГО файла комплекта не потеряно по дороге — даже такого, на
+       который сегодня никто не ссылается. Счёт по диску с обеих сторон:
+       пропажа одной текстуры из сорока четырёх иначе прошла бы молча. */
+    const countPng = (dir: string): number =>
+      listFilesIn(dir).filter((f) => f.endsWith('.png')).length
+    expect(countPng(join(out, 'assets'))).toBe(countPng(join(ROOT, 'assets')))
+  } finally {
+    rmSync(out, { recursive: true, force: true })
+  }
+}, 60_000)

@@ -271,3 +271,67 @@ test('числа, продублированные в src/render, ещё сов�
   expect(VIEW.pitchGain).toBe(0.55)
   expect(types).toMatch(/^export const CROUCH_PITCH_GAIN = 0\.55$/m)
 })
+
+// ───────── динамический импорт, которого сборщик не видит ──────────────
+
+/**
+ * Спецификатор `import()` обязан быть ЛИТЕРАЛОМ, и без `@vite-ignore`.
+ *
+ * Куплено браузером, а не рассуждением. `renderer.ts` грузил аддоны `three`
+ * так: строка в переменной плюс `@vite-ignore` — обход TS7016 у аддонов без
+ * `.d.ts`. Обход оказался хуже дыры: `@vite-ignore` прямо запрещает
+ * сборщику переписать путь, в браузер уезжало голое
+ * `three/examples/jsm/loaders/KTX2Loader.js`, разрешать его там нечем — и
+ * страница спайка не запускалась НИ В ОДНОМ из четырёх режимов. Восемьдесят
+ * одна зелёная проверка этого не увидела: в `node` и в vitest такой импорт
+ * разрешается прекрасно, потому что там есть node_modules.
+ *
+ * Отсюда и форма стража: он смотрит не на конкретный путь, а на САМ приём —
+ * динамический импорт, который сборщик не может разрешить статически.
+ * Типам место в `.d.ts` рядом, а не в обходе сборщика.
+ */
+function unanalyzableDynamicImports(content: string): string[] {
+  const found: string[] = []
+  for (const m of content.matchAll(/\bimport\s*\(([^)]*)\)/g)) {
+    const arg = m[1].trim()
+    // `import()` без аргумента — это слово в комментарии, а не вызов.
+    if (!arg) continue
+    if (/@vite-ignore/.test(arg)) {
+      found.push(arg)
+      continue
+    }
+    // Литерал в кавычках — единственная форма, которую сборщик разбирает.
+    if (!/^(['"]).*\1$/.test(arg)) found.push(arg)
+  }
+  return found
+}
+
+test('детектор неразбираемых import(): литерал проходит, обход — нет', () => {
+  expect(unanalyzableDynamicImports("await import('three')")).toEqual([])
+  expect(unanalyzableDynamicImports('await import("./a.js")')).toEqual([])
+  expect(unanalyzableDynamicImports("await import(/* @vite-ignore */ 'x')")).toHaveLength(1)
+  expect(unanalyzableDynamicImports('const A = "x"; await import(A)')).toHaveLength(1)
+  expect(unanalyzableDynamicImports("await import(`./${n}.js`)")).toHaveLength(1)
+  // `import.meta` и статический импорт детектор не трогает.
+  expect(unanalyzableDynamicImports("new URL('./x.js', import.meta.url)")).toEqual([])
+  // Слово «import()» в комментарии вызовом не считается.
+  expect(unanalyzableDynamicImports('/* динамический import() разрешает... */')).toEqual([])
+})
+
+test('в нашем коде под src нет импортов, которых сборщик не видит', () => {
+  /* `src/core` исключён, и это не поблажка: там побайтовые копии логики
+     (`pose.engine.js: import(VENDOR.bundle)`, `pose.worker.js:
+     import(msg.packUrl)`), править которые запрещено манифестом хешей. Они
+     и не должны разбираться сборщиком — адрес им приходит в рантайме,
+     ровно за этим страница спайка их и перекрывает. Страж стережёт КОД,
+     который мы пишем сами. */
+  const core = join(ROOT, 'src', 'core') + sep
+  const violations: string[] = []
+  for (const file of listFiles(join(ROOT, 'src'))) {
+    if (!/\.(ts|js)$/.test(file)) continue
+    if (file.startsWith(core)) continue
+    const bad = unanalyzableDynamicImports(readFileSync(file, 'utf8'))
+    for (const arg of bad) violations.push(`${file}: import(${arg})`)
+  }
+  expect(violations).toEqual([])
+})

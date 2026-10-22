@@ -17,8 +17,8 @@ import { VIEW } from '../../core/config.js'
 import { CROUCH_PITCH_GAIN, DRAW_FAR_M } from '../types'
 import type { FrameScene } from '../types'
 import { cameraX } from '../numbers'
+import { backdropPlacements } from '../estimate'
 import {
-  backdropPlacements,
   build3D,
   buildBackdrop,
   forgetMaterials,
@@ -183,10 +183,13 @@ export type ThreeRendererDeps = {
 const TRANSCODER_PATH = 'assets/basis/'
 
 async function defaultKtx2(): Promise<Ktx2Like | null> {
-  /* Спецификатор переменной, а не литералом: у аддонов `three` этой версии
-     нет `.d.ts`, и литерал дал бы TS7016 при `tsc --noEmit`. */
-  const ADDON = 'three/examples/jsm/loaders/KTX2Loader.js'
-  const { KTX2Loader } = (await import(/* @vite-ignore */ ADDON)) as any
+  /* Спецификатор ЛИТЕРАЛОМ, и это не косметика. Прежняя форма — строка в
+     переменной плюс `@vite-ignore` — обходила отсутствие `.d.ts` у аддонов
+     (TS7016), но ценой того, что сборщик путь не переписывал: в браузер
+     уезжало голое `three/examples/...`, и страница падала с «Failed to
+     resolve module specifier». Типы теперь объявлены рядом (`addons.d.ts`),
+     и обход не нужен. */
+  const { KTX2Loader } = await import('three/examples/jsm/loaders/KTX2Loader.js')
   return new KTX2Loader().setTranscoderPath(TRANSCODER_PATH) as Ktx2Like
 }
 
@@ -199,8 +202,8 @@ async function defaultKtx2(): Promise<Ktx2Like | null> {
  * дырой в кадре.
  */
 async function defaultLoadAssets(ktx2: Ktx2Like | null): Promise<LoadedAssets> {
-  const ADDON = 'three/examples/jsm/loaders/GLTFLoader.js'
-  const { GLTFLoader } = (await import(/* @vite-ignore */ ADDON)) as any
+  /* Литералом, по той же причине, что и у `KTX2Loader` выше. */
+  const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js')
   const loader = new GLTFLoader()
   if (ktx2) loader.setKTX2Loader(ktx2)
 

@@ -16,7 +16,7 @@
  */
 import * as THREE from 'three'
 
-import { backdropAssets } from '../estimate'
+import { backdropAssets, backdropPlacements } from '../estimate'
 import type { AssetId, FrameScene, Placement } from '../types'
 
 /**
@@ -183,6 +183,19 @@ const WHITE = new THREE.Color('#ffffff')
  * по высоте вместе с шириной, то есть ступень сложности меняла бы высоту
  * препятствия.
  *
+ * Почему `z` уезжает со знаком минус. Описание кадра говорит «`z` — метры
+ * ВПЕРЁД по коридору» при `x` вправо и `y` вверх (`types.ts`), то есть
+ * система ЛЕВАЯ. У three.js она правая, и камера по умолчанию смотрит в
+ * −Z. Без этого знака весь кадр оказывался у камеры ЗА СПИНОЙ: вызовы
+ * считались, `stats()` сходился с `estimate`, а на экране был чёрный
+ * прямоугольник. Поймано не прогоном, а браузером на странице спайка —
+ * первым, кто на этот вывод посмотрел глазами.
+ *
+ * Отражение по одной оси меняет закрутку, поэтому `yaw` уезжает тоже со
+ * знаком минус: иначе повёрнутое размещение смотрело бы в зеркальную
+ * сторону. Сегодня `yaw` не ставит никто, и ровно поэтому это записано
+ * сейчас — в день первого поворота искать было бы негде.
+ *
  * Чего здесь НЕТ: `fade`. Дымка исполняется ТУМАНОМ сцены (`renderer.ts`), а
  * не прозрачностью, и это следствие правила «судят и рисуют по одному
  * числу»: `estimate` считает один вызов на примитив, то есть один проход.
@@ -192,8 +205,8 @@ const WHITE = new THREE.Color('#ffffff')
  * стоит ноль вызовов.
  */
 function placementMatrix(p: Placement, local: THREE.Matrix4): THREE.Matrix4 {
-  tmpPos.set(p.x, p.y, p.z)
-  tmpEuler.set(0, p.yaw ?? 0, 0)
+  tmpPos.set(p.x, p.y, -p.z)
+  tmpEuler.set(0, -(p.yaw ?? 0), 0)
   tmpQuat.setFromEuler(tmpEuler)
   tmpScale.set(p.size?.w ?? 1, p.size?.h ?? 1, p.size?.d ?? 1)
   tmpPlaced.compose(tmpPos, tmpQuat, tmpScale)
@@ -297,11 +310,6 @@ export function buildBackdrop(scene: FrameScene, assets: LoadedAssets): THREE.Gr
   group.name = 'backdrop'
   for (const p of backdropPlacements(scene)) addInstanced(group, p.asset, [p], assets)
   return group
-}
-
-/** Постоянная часть кадра как список размещений — по одному на ассет. */
-export function backdropPlacements(scene: FrameScene): Placement[] {
-  return backdropAssets(scene).map((asset) => ({ asset, x: 0, y: 0, z: 0 }))
 }
 
 /**
