@@ -91,6 +91,21 @@ export function runFromQuery(search: string): Run {
   return { what, delegate }
 }
 
+/**
+ * Четыре адреса замера — ЕДИНСТВЕННЫЙ их владелец.
+ *
+ * Адреса, а не разобранные прогоны: человек набирает на телефоне именно их,
+ * и кнопки страницы обязаны вести туда же. Прогоняется этот список через
+ * `runFromQuery` и в `boot()`, и в проверке — значит «поменяли строку, а
+ * кнопка осталась прежней» перестало быть возможным.
+ */
+export const SPIKE_RUNS = [
+  '?what=scene',
+  '?what=pose&delegate=gpu',
+  '?what=both&delegate=gpu',
+  '?what=both&delegate=cpu',
+] as const
+
 /** Как прогон называется в журнале и на кнопке. */
 export function runName(run: Run): string {
   return `${run.what}/${run.delegate ?? '-'}`
@@ -145,8 +160,19 @@ export type Health = {
  * `renderer.stats()`. Разборщик их просто не заметит: он берёт поля по
  * именам, а не весь объект.
  */
-export function makeHealth(stats: () => { calls: number; verts: number }): Health {
-  let since = 0
+export function makeHealth(
+  stats: () => { calls: number; verts: number },
+  startedAt: number,
+): Health {
+  /* Начало ПЕРВОГО окна приходит снаружи, и умолчания у него нет нарочно.
+     `now` на странице — это `performance.now()` от загрузки документа, и
+     ноль здесь означал бы, что первое окно каждого прогона длиной во всё
+     время жизни страницы: `fps`, `hz` и `ok` занижены в разы, а разборщик
+     берёт как раз `min` — то есть «худшее» каждого прогона оказалось бы
+     мусором. Порог `hz ≥ 10` решает развилку, и ронять его нечем.
+     `run-game` ставит `health.since = performance.now()` при старте забега
+     (`train.js:1105`) — здесь ровно то же. */
+  let since = startedAt
   let lastFrame = 0
   let frames = 0
   let poses = 0
@@ -251,6 +277,26 @@ export function poseInit(run: Run, base?: string): Record<string, unknown> {
 
 // ─────────────────────────────── забег ───────────────────────────────
 
+/**
+ * Воркер распознавания. Отдельной функцией, а не строкой внутри прогона, по
+ * двум причинам сразу.
+ *
+ * Первая: воркер обязан быть КЛАССИЧЕСКИМ. MediaPipe выполняет свой
+ * wasm-загрузчик через `importScripts`, которого в модульном воркере не
+ * существует, и падает там с «ModuleFactory not set». Отсутствие
+ * `{ type: 'module' }` — не забывчивость, и место ему рядом с объяснением.
+ *
+ * Вторая: спецификатор обязан быть ЛИТЕРАЛОМ внутри `new URL(...,
+ * import.meta.url)` — только так сборщик видит воркер и собирает его. Тот же
+ * адрес, составленный в рантайме, в `dev` отдаётся как обычный модуль и
+ * падает с «Cannot use import statement outside a module». Проверено
+ * браузером: именно так и вышло при попытке позвать воркер мимо этой
+ * функции.
+ */
+export function makePoseWorker(): Worker {
+  return new Worker(new URL('../core/pose.worker.js', import.meta.url))
+}
+
 /** Мир, посев и ступень замера. Одни и те же во всех четырёх прогонах. */
 export const WORLD = 'city'
 export const SEED = 1
@@ -342,10 +388,7 @@ type Live = {
  * бы прошлый работать, и «both» мерился бы поверх «scene».
  */
 async function runLive(run: Run, canvas: HTMLCanvasElement, say: (s: string) => void): Promise<Live> {
-  noteRunStart(run)
-
   let renderer: Renderer | null = null
-  const health = makeHealth(() => renderer?.stats() ?? NO_DRAW)
 
   // ── картинка ──
   let raf = 0
@@ -364,10 +407,7 @@ async function runLive(run: Run, canvas: HTMLCanvasElement, say: (s: string) => 
     if (typeof MediaStreamTrackProcessor === 'undefined') {
       throw new Error('нет MediaStreamTrackProcessor: замер на этом браузере несравним')
     }
-    /* Воркер КЛАССИЧЕСКИЙ, не модульный: MediaPipe выполняет свой
-       wasm-загрузчик через `importScripts`, которого в модульном воркере
-       нет, и падает там с «ModuleFactory not set». */
-    worker = new Worker(new URL('../core/pose.worker.js', import.meta.url))
+    worker = makePoseWorker()
     worker.onmessage = (e: MessageEvent) => {
       const m = e.data
       if (m.type === 'pose') health.pose(m)
@@ -389,7 +429,14 @@ async function runLive(run: Run, canvas: HTMLCanvasElement, say: (s: string) => 
      которому мерится то же самое. */
   const level = makeRun()
   const t0 = performance.now()
-  let lastWindow = performance.now()
+  let lastWindow = t0
+
+  /* `run.start` пишется ПОСЛЕ того, как всё завелось, а не до. Иначе
+     несостоявшийся прогон (камера не открылась, делегат не поднялся) всё
+     равно оставлял бы запись, и повтор дал бы в таблице разбора пятый
+     забег с нулём окон — рядом с четырьмя настоящими. */
+  noteRunStart(run)
+  const health = makeHealth(() => renderer?.stats() ?? NO_DRAW, t0)
 
   const frame = (now: number): void => {
     raf = requestAnimationFrame(frame)
@@ -429,11 +476,54 @@ async function runLive(run: Run, canvas: HTMLCanvasElement, say: (s: string) => 
 }
 
 /**
+ * Держать экран включённым, пока идёт замер.
+ *
+ * Без этого вся затея рушится тихо: прогон идёт не меньше минуты без единого
+ * касания, экран гаснет, `requestAnimationFrame` встаёт — и `gap95` с
+ * паузами отравлены ровно там, где снимается приговор. `run-game` держит
+ * блокировку по той же причине (`app.js:140`).
+ *
+ * Имена событий журнала те же, что там: разбор считает по ним, сколько раз
+ * блокировку снимало системой (`released: true, why: 'system'`) и сколько
+ * раз её брали заново (`got: true, why: 'regain'`). Запрос повторяется при
+ * возврате на вкладку: система снимает блокировку, уводя страницу в фон, и
+ * сама её не возвращает.
+ */
+function keepAwake(): void {
+  const api = (navigator as any).wakeLock
+  if (!api) {
+    log.event('wakelock', { got: false, why: 'unsupported' })
+    return
+  }
+  let held: any = null
+  const ask = async (why: string): Promise<void> => {
+    if (held && held.released !== true) return
+    try {
+      const lock = await api.request('screen')
+      held = lock
+      lock.addEventListener?.('release', () => {
+        if (held !== lock) return
+        held = null
+        log.event('wakelock', { got: false, released: true, why: 'system' })
+      })
+      log.event('wakelock', { got: true, why })
+    } catch (e) {
+      log.event('wakelock', { got: false, why: String((e as Error)?.name ?? e) })
+    }
+  }
+  void ask('start')
+  addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void ask('regain')
+  })
+}
+
+/**
  * Запуск страницы. Зовётся из `spike.html`, а не сама: модуль обязан
  * импортироваться в `node` (его проверяет прогон), а там страницы нет.
  */
 export function boot(): void {
   log.watchLifecycle()
+  keepAwake()
 
   const canvas = document.getElementById('stage') as HTMLCanvasElement
   const status = document.getElementById('status') as HTMLElement
@@ -464,8 +554,7 @@ export function boot(): void {
   /* Четыре кнопки — те же четыре прогона, что и четыре адреса. Кнопки нужны,
      чтобы все четыре легли в ОДНУ сессию журнала: разброс устройства живёт
      между сессиями. */
-  for (const search of ['?what=scene', '?what=pose&delegate=gpu',
-    '?what=both&delegate=gpu', '?what=both&delegate=cpu']) {
+  for (const search of SPIKE_RUNS) {
     const run = runFromQuery(search)
     const b = document.createElement('button')
     b.textContent = runName(run)

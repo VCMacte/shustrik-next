@@ -286,13 +286,17 @@ test('габарит в метрах и поворот доезжают до м�
   const scale = new THREE.Vector3()
   m.decompose(pos, quat, scale)
 
-  expect([pos.x, pos.y, pos.z]).toEqual([-0.75, 0, 4])
+  /* `z` уезжает со знаком минус: описание держит «вперёд» положительным
+     (левая система), three.js смотрит в −Z. Подробности — в
+     `placementMatrix`. */
+  expect([pos.x, pos.y, pos.z]).toEqual([-0.75, 0, -4])
   expect(scale.x).toBeCloseTo(0.5, 6)
   expect(scale.y).toBeCloseTo(2.6, 6)
   // Отсутствующее измерение — свой натуральный метр, а не ноль и не копия соседа.
   expect(scale.z).toBeCloseTo(1, 6)
   const euler = new THREE.Euler().setFromQuaternion(quat, 'YXZ')
-  expect(euler.y).toBeCloseTo(Math.PI / 2, 6)
+  // Отражение по одной оси меняет закрутку, поэтому и `yaw` со знаком минус.
+  expect(euler.y).toBeCloseTo(-Math.PI / 2, 6)
 })
 
 /**
@@ -544,7 +548,8 @@ test('два кадра с одним набором ассетов идут п�
   const kelp = after.find((x) => x.name === 'decor/kelp')!
   kelp.getMatrixAt(0, m)
   m.decompose(pos, new THREE.Quaternion(), new THREE.Vector3())
-  expect(pos.z).toBeCloseTo(4.5, 6)
+  // Со знаком минус: см. `placementMatrix` — описание левое, three.js правый.
+  expect(pos.z).toBeCloseTo(-4.5, 6)
 
   /* ТЕ ЖЕ ассеты, но ДРУГОЕ их число — случай, на котором «переиспользуем»
      опаснее всего: ёмкость `InstancedMesh` задана при создании, и подправить
@@ -913,4 +918,70 @@ test('свет запечён: источников нет, материалы �
   expect(basic).toBeGreaterThan(0)
   renderer.dispose()
   forgetMaterials()
+})
+
+/**
+ * Кадр обязан оказаться ПЕРЕД камерой, а не у неё за спиной.
+ *
+ * Куплено браузером. Описание держит «вперёд» положительным `z` (левая
+ * система, `types.ts`), three.js — правый и смотрит в −Z; без знака минус в
+ * `placementMatrix` весь кадр уезжал камере за спину. Ни одна из
+ * восьмидесяти проверок этого не видела: `stats3D` считает граф, а не
+ * видимость, и `renderer.stats() === estimate` сходилось в точности — при
+ * чёрном экране.
+ *
+ * Прошла бы вхолостую? НЕТ: убери минус — пирамида видимости перестаёт
+ * содержать размещение, и первое же `expect` падает. Проверяется именно
+ * ВИДИМОСТЬ (пирамида настоящей камеры вывода), а не знак координаты:
+ * знак — это та же формула, только переписанная в тест.
+ */
+test('содержимое кадра стоит перед камерой, а не за спиной', async () => {
+  const { renderer } = await makeTestRenderer()
+  renderer.resize(1280, 720, 1)
+  /* Кольцо на восьми метрах прямо по курсу — такое же, какое отдаёт
+     `composeScene` на первой секунде забега. */
+  renderer.draw(sceneWith([{ asset: 'star/ring', x: 0, y: 0.55, z: 8 }]))
+
+  /* `any`: `three@0.186` не поставляет типов вовсе, и TypeScript выводит их
+     из исходника сам — до половины полей камеры он при этом не добирается.
+     Проверяются здесь ЗНАЧЕНИЯ, а не типы. */
+  const camera = renderer.camera() as any
+  camera.updateMatrixWorld(true)
+  const toCamera = (new THREE.Matrix4() as any).copy(camera.matrixWorld).invert()
+  const halfV = ((camera.fov * Math.PI) / 180) / 2
+  const halfH = HFOV_RAD / 2
+
+  /** Центры всех инстансов кадра в системе координат КАМЕРЫ. */
+  const seen: Array<{ x: number; y: number; z: number }> = []
+  renderer.root().traverse((o) => {
+    const mesh = o as any
+    if (!mesh.isInstancedMesh) return
+    mesh.updateMatrixWorld(true)
+    const m = new THREE.Matrix4()
+    for (let i = 0; i < mesh.count; i++) {
+      mesh.getMatrixAt(i, m)
+      const e = (m as any).elements
+      const p = (new THREE.Vector3(e[12], e[13], e[14]) as any)
+        .applyMatrix4(mesh.matrixWorld)
+        .applyMatrix4(toCamera)
+      seen.push({ x: p.x, y: p.y, z: p.z })
+    }
+  })
+
+  expect(seen.length).toBeGreaterThan(0)
+  /* Постоянная часть кадра (пол, стены, небо) стоит в начале координат по
+     построению — `backdropPlacements` отдаёт всем `x: 0, y: 0, z: 0`, а
+     вперёд её тянет собственная геометрия ассета. Судить о направлении
+     взгляда по ней нельзя, поэтому берутся РАЗМЕЩЕНИЯ. */
+  const placed = seen.filter((p) => p.z !== 0)
+  expect(placed).toHaveLength(1)
+
+  /* Перед камерой — это ОТРИЦАТЕЛЬНЫЙ `z` в её системе: three.js смотрит в
+     −Z, а описание держит «вперёд» положительным. */
+  expect(placed[0].z).toBeCloseTo(-8, 6)
+  // И кольцо попадает в поле зрения, а не уезжает за край кадра.
+  expect(Math.abs(placed[0].x)).toBeLessThanOrEqual(-placed[0].z * Math.tan(halfH))
+  expect(Math.abs(placed[0].y)).toBeLessThanOrEqual(-placed[0].z * Math.tan(halfV))
+
+  renderer.dispose()
 })

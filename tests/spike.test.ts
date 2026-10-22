@@ -244,7 +244,7 @@ test('разбор run-game читает наш журнал', async () => {
   /* Окна здоровья пишет НАСТОЯЩИЙ накопитель страницы спайка: имена полей и
      способ счёта живут там, а не здесь. Кадры ровные по 33 мс — значит
      `gap95` каждого окна равен 33, и медиана окон тоже 33. */
-  const health = spike.makeHealth(() => ({ calls: 120, verts: 90_000 }))
+  const health = spike.makeHealth(() => ({ calls: 120, verts: 90_000 }), 0)
   let now = 0
   for (let window = 0; window < 3; window++) {
     for (let i = 0; i < 30; i++) {
@@ -274,7 +274,7 @@ test('разбор run-game читает наш журнал', async () => {
 })
 
 test('живой счёт кадра едет в журнал рядом с ровностью', async () => {
-  const health = spike.makeHealth(() => ({ calls: 121, verts: 91_000 }))
+  const health = spike.makeHealth(() => ({ calls: 121, verts: 91_000 }), 0)
   let now = 0
   for (let i = 0; i < 30; i++) {
     now += 33
@@ -290,15 +290,11 @@ test('живой счёт кадра едет в журнал рядом с ро
 })
 
 test('четыре прогона различимы в журнале', async () => {
-  /* Четыре АДРЕСА — ровно те, что человек откроет на телефоне. Прогоны
-     берутся из разбора адреса, а не из списка внутри кода: сверять список с
-     тем же списком значило бы ничего не сверять. */
-  for (const search of [
-    '?what=scene',
-    '?what=pose&delegate=gpu',
-    '?what=both&delegate=gpu',
-    '?what=both&delegate=cpu',
-  ]) {
+  /* Прогоняется ТОТ ЖЕ список адресов, из которого страница строит кнопки
+     (`SPIKE_RUNS`), — иначе «поменяли строку в boot(), всё осталось
+     зелёным» было бы возможно. Самосверки здесь не возникает: сверяются
+     АДРЕСА с ИМЕНАМИ, записанными литералом, а не список со списком. */
+  for (const search of spike.SPIKE_RUNS) {
     spike.noteRunStart(spike.runFromQuery(search))
   }
 
@@ -367,6 +363,40 @@ test('воркер позы получает пути сборки, а не VEND
   expect(init.packUrl).toMatch(/core\/pose\.pack\.js$/)
 
   expect(spike.poseInit({ what: 'pose', delegate: 'gpu' }, 'https://x/').delegate).toBe('GPU')
+})
+
+test('кнопки страницы ведут ровно в четыре прогона замера', () => {
+  /* Имена — литералом, адреса — из владельца. Разъехались бы они молча:
+     `?what=pose` без делегата дал бы `pose/gpu` и выглядел бы правильно, а
+     строка таблицы «поза на процессоре» исчезла бы из замера. */
+  expect(spike.SPIKE_RUNS.map((s) => spike.runName(spike.runFromQuery(s))))
+    .toEqual(['scene/-', 'pose/gpu', 'both/gpu', 'both/cpu'])
+})
+
+test('первое окно считается от начала прогона, а не от загрузки страницы', () => {
+  /* Страница загрузилась давно: на старте прогона `performance.now()` — сто
+     секунд. Если бы окно считалось от нуля, span первого окна вышел бы в
+     сто секунд, и `fps`/`hz` занизились бы в разы — а разбор берёт у
+     прогона именно `min`, то есть «худшее» стало бы мусором. */
+  const t0 = 100_000
+  const health = spike.makeHealth(() => ({ calls: 7, verts: 7 }), t0)
+  const window = (from: number): Record<string, number | string> => {
+    let now = from
+    for (let i = 0; i < 30; i++) {
+      now += 33
+      health.frame(now)
+      health.pose({ inferMs: 40, dropped: 0, lm: new Float32Array(132) })
+    }
+    return health.flush(now, 'both')!
+  }
+
+  const first = window(t0)
+  expect(first.fps).toBe(30)
+  expect(first.hz).toBe(30)
+  // Второе окно считается от конца первого — и обязано совпасть с первым.
+  const second = window(t0 + 30 * 33)
+  expect(second.fps).toBe(first.fps)
+  expect(second.hz).toBe(first.hz)
 })
 
 test('забег спайка — тот же, что перебирает бюджет', async () => {
