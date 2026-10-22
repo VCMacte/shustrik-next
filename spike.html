@@ -13,6 +13,10 @@
       body { display: flex; flex-direction: column; }
       #stage { flex: 1; width: 100%; display: block; background: #0b1016; }
       #status { padding: 10px 14px; font-variant-numeric: tabular-nums; }
+      /* Беда — ЗАЛИВКОЙ и крупно, а не рамкой и не тоном: Miracast режет
+         цветность сильнее светлоты, и тонкая рамка через него не доживает. */
+      #warn { margin: 0 14px 10px; padding: 12px 14px; border-radius: 10px;
+        background: #b4451f; color: #fff; font-weight: 700; }
       #runs { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 14px 14px; }
       #runs button { flex: 1 1 auto; min-width: 120px; padding: 14px 10px;
         border: 0; border-radius: 10px; background: #2e4a63; color: #eef3f8;
@@ -23,6 +27,7 @@
   <body>
     <canvas id="stage"></canvas>
     <div id="status">запуск…</div>
+    <div id="warn" hidden></div>
     <div id="runs"></div>
     <script type="module">
       /* Страница зовёт `boot()` сама, а модуль не запускается при импорте:

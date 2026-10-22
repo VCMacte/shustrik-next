@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -112,10 +112,71 @@ function mediapipeFromBuild(): Plugin {
   }
 }
 
+/** Каталог ассетов комплекта. Тот же, из которого считает `asset-stat.mjs`. */
+const ASSETS_DIR = 'assets'
+
+/** Все файлы под `dir`, путями относительно корня проекта, через `/`. */
+function filesUnder(dir: string, prefix = ''): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(join(HERE, dir)).sort()) {
+    const rel = prefix ? `${prefix}/${entry}` : entry
+    if (statSync(join(HERE, dir, entry)).isDirectory()) {
+      out.push(...filesUnder(`${dir}/${entry}`, rel))
+    } else {
+      out.push(rel)
+    }
+  }
+  return out
+}
+
+/**
+ * Комплект ассетов — В СБОРКУ.
+ *
+ * Без этого `dist/` не содержал ни одного `.glb`: вывод грузит их по
+ * `assets/<id>.glb` от корня сайта, а корневой `assets/` не лежит в
+ * `public/` и сам собой никуда не копируется. В `npm run dev` этого не
+ * видно — там Vite отдаёт файлы прямо от корня проекта, и коридор
+ * рисуется. Ломается ровно то, что человек повезёт к штативу: собранная
+ * страница падает 404 на первом же `loadAsync`, и все четыре прогона
+ * говорят «не запустился».
+ *
+ * Выбран перенос В СБОРКУ, а не «раздавать корень проекта». Вторая
+ * возможность дешевле на одну строку инструкции, но собранная страница
+ * обязана быть САМОДОСТАТОЧНОЙ: она уезжает на телефон целиком, без
+ * `node_modules` и без исходников, и страница, работающая только из
+ * дерева разработки, — ловушка того же рода, что и пройденная.
+ *
+ * `publicDir` для этого не годится: он один, и его уже некуда двигать —
+ * там лежит модель поз, которой в пакетах нет. Имена при переносе
+ * сохраняются дословно: загрузчик достраивает путь к текстуре сам, из
+ * `uri` внутри `.glb` (`../tex/<...>.png`), и хешированное имя он не
+ * найдёт — та же причина, что у файлов MediaPipe выше.
+ */
+function bundleAssets(): Plugin {
+  return {
+    name: 'bundle-assets',
+    generateBundle() {
+      const files = filesUnder(ASSETS_DIR)
+      if (!files.length) throw new Error('комплект ассетов пуст: нечего класть в сборку')
+      for (const rel of files) {
+        this.emitFile({
+          type: 'asset',
+          fileName: `${ASSETS_DIR}/${rel}`,
+          source: new Uint8Array(readFileSync(join(HERE, ASSETS_DIR, rel))),
+        })
+      }
+    },
+  }
+}
+
 export default defineConfig({
   root: '.',
-  plugins: [mediapipeFromBuild()],
+  plugins: [mediapipeFromBuild(), bundleAssets()],
   build: {
+    /* Свои чанки — в `build/`, а не в `assets/`. По умолчанию Vite кладёт
+       их туда же, куда переносится комплект арта, и однажды имя совпало бы
+       молча. Разные каталоги снимают этот класс целиком. */
+    assetsDir: 'build',
     rollupOptions: {
       /* Две страницы: игра и спайк. Спайк — не часть игры и в неё не ведёт:
          это измерительный стенд, который уедет вместе с развилкой. */

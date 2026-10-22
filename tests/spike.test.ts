@@ -189,6 +189,10 @@ function installBrowserStubs() {
     return 'blob:spike-test'
   }) as typeof realCreateObjectURL
   URL.revokeObjectURL = (() => {}) as typeof URL.revokeObjectURL
+  /* `addEventListener` на globalThis в node есть не всегда, а `keepAwake`
+     подписывается на возврат вкладки. Пустая заглушка: проверяется здесь
+     не подписка, а то, что отказ сказан вслух. */
+  if (typeof g.addEventListener !== 'function') g.addEventListener = () => {}
   g.document = {
     createElement: () => ({
       href: '',
@@ -427,4 +431,35 @@ test('сборка вправду кладёт файлы MediaPipe туда, к
   expect(mediapipeSource('/mediapipe/vision_bundle.js')).toBe('bundle')
   expect(mediapipeSource('/index.html')).toBeNull()
   expect(mediapipeSource('/mediapipe/wasm')).toBeNull()
+})
+
+test('без блокировки экрана страница говорит об этом ВСЛУХ, а не только в журнал', async () => {
+  /* Главная ветка здесь — отказ. Молчаливый `wakelock {got:false}` в
+     журнале человек увидел бы уже после выезда, разбирая числа, в которых
+     нечего поправить: погасший экран останавливает кадры, и `gap95` снят
+     не с игры, а с чёрного экрана. */
+  const said: Array<string | null> = []
+
+  spike.keepAwake((t) => said.push(t), undefined)
+  expect(said).toHaveLength(1)
+  expect(said[0]).toMatch(/автоблокировк/i)
+
+  // А когда блокировку дали — страница молчит и гасит прежнее предупреждение.
+  said.length = 0
+  spike.keepAwake((t) => said.push(t), {
+    request: async () => ({ released: false, addEventListener() {} }),
+  })
+  await new Promise((r) => setTimeout(r, 0))
+  expect(said).toEqual([null])
+
+  // Отказ самого запроса (телефон может и отказать) — тоже вслух.
+  said.length = 0
+  spike.keepAwake((t) => said.push(t), {
+    request: async () => {
+      throw new Error('NotAllowedError')
+    },
+  })
+  await new Promise((r) => setTimeout(r, 0))
+  expect(said).toHaveLength(1)
+  expect(said[0]).toMatch(/автоблокировк/i)
 })

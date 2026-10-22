@@ -489,10 +489,23 @@ async function runLive(run: Run, canvas: HTMLCanvasElement, say: (s: string) => 
  * возврате на вкладку: система снимает блокировку, уводя страницу в фон, и
  * сама её не возвращает.
  */
-function keepAwake(): void {
-  const api = (navigator as any).wakeLock
+export function keepAwake(
+  warn: (text: string | null) => void,
+  /* Запрашиватель приходит параметром, а не берётся из `navigator` внутри:
+     ветку «блокировки не дали» иначе нечем проверить, а она и есть главная
+     — молчаливый отказ здесь стоит целого выезда. */
+  api: { request(kind: string): Promise<any> } | undefined = (navigator as any)?.wakeLock,
+): void {
+  /* Молчать нельзя. Прежняя версия писала отказ только в журнал — то есть
+     человек узнавал бы о погасшем экране ПОСЛЕ выезда, разбирая числа, в
+     которых уже ничего не поправить. Отказ обязан быть на экране, рядом с
+     кнопками, и не исчезать. */
+  const complain = (why: string): void => {
+    warn(`экран может погаснуть (${why}) — выключите автоблокировку в настройках телефона`)
+  }
   if (!api) {
     log.event('wakelock', { got: false, why: 'unsupported' })
+    complain('браузер не умеет wakeLock')
     return
   }
   let held: any = null
@@ -501,14 +514,18 @@ function keepAwake(): void {
     try {
       const lock = await api.request('screen')
       held = lock
+      warn(null)
       lock.addEventListener?.('release', () => {
         if (held !== lock) return
         held = null
         log.event('wakelock', { got: false, released: true, why: 'system' })
+        complain('система сняла блокировку')
       })
       log.event('wakelock', { got: true, why })
     } catch (e) {
-      log.event('wakelock', { got: false, why: String((e as Error)?.name ?? e) })
+      const name = String((e as Error)?.name ?? e)
+      log.event('wakelock', { got: false, why: name })
+      complain(name)
     }
   }
   void ask('start')
@@ -523,14 +540,23 @@ function keepAwake(): void {
  */
 export function boot(): void {
   log.watchLifecycle()
-  keepAwake()
 
   const canvas = document.getElementById('stage') as HTMLCanvasElement
   const status = document.getElementById('status') as HTMLElement
   const buttons = document.getElementById('runs') as HTMLElement
+  const warnEl = document.getElementById('warn') as HTMLElement
   const say = (s: string): void => {
     status.textContent = s
   }
+  /* Предупреждение живёт ОТДЕЛЬНОЙ строкой: `say` переписывается каждую
+     секунду числами окна, и беда, попавшая туда, исчезла бы через секунду. */
+  const warn = (text: string | null): void => {
+    warnEl.textContent = text ?? ''
+    warnEl.hidden = !text
+  }
+  /* После `warn`, а не до: блокировка умеет не дасться, и сказать об этом
+     надо на экран, которого до этой строки ещё нет. */
+  keepAwake(warn)
 
   let current: Live | null = null
   let busy = false
