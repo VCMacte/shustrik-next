@@ -299,7 +299,7 @@ test('четыре прогона различимы в журнале', async (
      зелёным» было бы возможно. Самосверки здесь не возникает: сверяются
      АДРЕСА с ИМЕНАМИ, записанными литералом, а не список со списком. */
   for (const search of spike.SPIKE_RUNS) {
-    spike.noteRunStart(spike.runFromQuery(search))
+    spike.noteRunStart(spike.runFromQuery(search), spike.DEFAULT_WORLD)
   }
 
   const dump = await exportedDump()
@@ -462,4 +462,113 @@ test('без блокировки экрана страница говорит �
   await new Promise((r) => setTimeout(r, 0))
   expect(said).toHaveLength(1)
   expect(said[0]).toMatch(/автоблокировк/i)
+})
+
+// ──────────────────────────── пульт замера ────────────────────────────
+
+test('плитки пульта называют прогоны словами, а не кодом', () => {
+  /* `both/gpu` на кнопке читается только тем, кто помнит таблицу спайка.
+     У штатива стоит человек с телефоном в руках, и ему нужен номер строки
+     таблицы и слова. Номер — чтобы прогоны шли в порядке таблицы: разбор
+     `run-game` печатает забеги в порядке записи, и переставленный третий
+     прогон пришлось бы искать глазами. */
+  const tiles = spike.SPIKE_RUNS.map((s) => spike.runTile(spike.runFromQuery(s)))
+
+  expect(tiles.map((t) => t.no)).toEqual([1, 2, 3, 4])
+  expect(tiles.map((t) => `${t.title} · ${t.sub}`)).toEqual([
+    'Картинка · без позы',
+    'Поза · видеоядро, без картинки',
+    'Всё вместе · видеоядро',
+    'Всё вместе · процессор',
+  ])
+
+  /* Два последних прогона — вся суть замера: один и тот же кадр на
+     видеоядре и на процессоре. Совпади их подписи — человек записал бы
+     один прогон дважды и не узнал бы об этом. */
+  expect(tiles[2].sub).not.toBe(tiles[3].sub)
+})
+
+test('пульт не просит блокировку экрана до касания калитки', () => {
+  /* Полный экран и `wakeLock` браузер отдаёт только по живому жесту. Пока
+     страница просила их при загрузке, отказ приходил молча — и обнаружился
+     бы погасшим экраном посреди прогона, то есть отравленным `gap95`
+     ровно там, где снимается приговор. */
+  let awake = 0
+  let fullscreen = 0
+  const pult = spike.makePult({
+    keepAwake: () => void awake++,
+    fullscreen: () => void fullscreen++,
+    play: () => {},
+  })
+
+  expect(pult.screen).toBe('gate')
+  expect(awake).toBe(0)
+  expect(fullscreen).toBe(0)
+
+  pult.start()
+  expect(pult.screen).toBe('pult')
+  expect(awake).toBe(1)
+  expect(fullscreen).toBe(1)
+})
+
+test('пульт помнит, какие прогоны в этой сессии уже шли', () => {
+  /* Четыре прогона снимаются в ОДНОЙ сессии, и пропущенный обнаруживается
+     уже на разборе, когда телефон сложен и ребёнок ушёл. Отметка стоит на
+     экране. */
+  const played: Array<[string, string]> = []
+  const pult = spike.makePult({ play: (run, world) => played.push([spike.runName(run), world]) })
+  pult.start()
+
+  const third = spike.runFromQuery(spike.SPIKE_RUNS[2])
+  pult.pick(third)
+
+  expect(pult.screen).toBe('run')
+  expect(pult.done).toEqual(['both/gpu'])
+  // Прогон запускается с ТЕМ миром, который выбран на пульте, а не со своим.
+  expect(played).toEqual([['both/gpu', pult.world]])
+
+  pult.toMenu()
+  expect(pult.screen).toBe('pult')
+  expect(pult.done).toEqual(['both/gpu'])
+
+  // Повтор прогона второй отметки не заводит: прогонов по-прежнему четыре.
+  pult.pick(third)
+  expect(pult.done).toEqual(['both/gpu'])
+})
+
+test('миры пульта — те же, что мерит бюджет, и выдуманного среди них нет', async () => {
+  /* `tools/budget.mjs` объявлен ЕДИНСТВЕННЫМ владельцем списка миров, но
+     живёт в node и тянет `node:fs` — в браузер его не внести. Поэтому
+     список на пульте второй, как `makeRun` против `runOf`, и сторожится
+     здесь, а не договорённостью: разъедутся — на телефоне будут мерить мир,
+     которого бюджет не считал.
+
+     Заодно ловится `WORLD = 'city'`, с которым спайк жил: такого мира в
+     `WORLDS` нет вовсе, `zonesOf` молча откатывался на зоны холмов — то
+     есть рисовались холмы, а в журнал каждого забега шло имя мира,
+     которого не существует. */
+  const { measuredWorlds } = await import('../tools/budget.mjs')
+  expect(spike.spikeWorlds()).toEqual(measuredWorlds())
+  expect(spike.spikeWorlds()).not.toContain('city')
+
+  // Кнопка крутит список по кругу, а не упирается в последний мир.
+  const worlds = spike.spikeWorlds()
+  const pult = spike.makePult({ play: () => {} })
+  expect(pult.world).toBe(worlds[0])
+  for (let i = 1; i <= worlds.length; i++) {
+    pult.nextWorld()
+    expect(pult.world).toBe(worlds[i % worlds.length])
+  }
+})
+
+test('выбранный мир доезжает до журнала', async () => {
+  /* Без этой проверки кнопка мира — украшение: картинка сменилась бы, а
+     разбор всех четырёх забегов по-прежнему называл бы один и тот же мир,
+     и сравнить замеры разных миров было бы нечем. */
+  await log.clear()
+  spike.noteRunStart(spike.runFromQuery('?what=both&delegate=cpu'), 'ice')
+  const dump = await exportedDump()
+  const starts = dump.sessions.flatMap((s: any) => s.log).filter((e: any) => e.type === 'run.start')
+  expect(starts).toHaveLength(1)
+  expect(starts[0].world).toBe('ice')
 })

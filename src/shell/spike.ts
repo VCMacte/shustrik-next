@@ -26,7 +26,7 @@
 import { makeLevel } from '../core/level.js'
 import { tuneFor } from '../core/difficulty.js'
 import { unlockedAt } from '../core/awards.js'
-import { zoneAt } from '../core/theme.js'
+import { zoneAt, WORLDS, worldReady } from '../core/theme.js'
 import { POSE } from '../core/config.js'
 import { quantile, round } from '../core/util.js'
 import { openCamera } from '../core/camera.js'
@@ -111,18 +111,51 @@ export function runName(run: Run): string {
   return `${run.what}/${run.delegate ?? '-'}`
 }
 
+/** Плитка пульта: номер строки таблицы спайка и подпись словами. */
+export type RunTile = {
+  /** Номер в таблице спайка; 0 — прогон не из таблицы (так бывает из адреса). */
+  no: number
+  title: string
+  sub: string
+}
+
+/**
+ * Как прогон выглядит на пульте.
+ *
+ * `both/gpu` на кнопке читается только тем, кто помнит таблицу спайка, — а у
+ * штатива стоит человек с телефоном в руках. Поэтому слова; и поэтому НОМЕР
+ * строки таблицы, а не просто порядок кнопок: разбор `run-game` печатает
+ * забеги в порядке записи, и прогон, снятый не по порядку, пришлось бы
+ * искать в выдаче глазами.
+ *
+ * Номер берётся из `SPIKE_RUNS` — у четвёрки один владелец, и «поменяли
+ * список, а номера остались прежними» невозможно.
+ */
+export function runTile(run: Run): RunTile {
+  const name = runName(run)
+  const no = SPIKE_RUNS.findIndex((s) => runName(runFromQuery(s)) === name) + 1
+  const where = run.delegate === 'cpu' ? 'процессор' : 'видеоядро'
+  if (run.what === 'scene') return { no, title: 'Картинка', sub: 'без позы' }
+  if (run.what === 'pose') return { no, title: 'Поза', sub: `${where}, без картинки` }
+  return { no, title: 'Всё вместе', sub: where }
+}
+
 /**
  * Отметка начала прогона. ЕДИНСТВЕННОЕ место, где `run.start` попадает в
  * журнал: по этим записям четыре прогона потом и различают.
  */
-export function noteRunStart(run: Run): void {
+export function noteRunStart(run: Run, world: string): void {
   /* `world` и `step` рядом не для полноты: разбор `run-game` печатает их у
      каждого забега, и без них четыре строки таблицы не сказали бы, что
-     сняты они с одного и того же кадра. */
+     сняты они с одного и того же кадра.
+
+     Мир приходит ПАРАМЕТРОМ, а не берётся из модуля: его крутят на пульте, и
+     умолчание внутри сделало бы кнопку украшением — картинка менялась бы, а
+     разбор всех четырёх забегов называл бы один и тот же мир. */
   log.event('run.start', {
     what: run.what,
     delegate: run.delegate ?? '-',
-    world: WORLD,
+    world,
     step: STEP,
   })
 }
@@ -297,8 +330,31 @@ export function makePoseWorker(): Worker {
   return new Worker(new URL('../core/pose.worker.js', import.meta.url))
 }
 
-/** Мир, посев и ступень замера. Одни и те же во всех четырёх прогонах. */
-export const WORLD = 'city'
+/**
+ * Миры, по которым вообще можно мерить. Второй список после `budget.mjs`.
+ *
+ * Владелец списка объявлен там (`measuredWorlds`), но `budget.mjs` живёт в
+ * `node` и тянет `node:fs` — в браузер его не внести. Поэтому здесь вторая
+ * запись того же правила, как `makeRun` против `runOf`, и сверяет их тест, а
+ * не договорённость: разъедутся — на телефоне будут мерить мир, которого
+ * бюджет не считал.
+ *
+ * Функция, а не константа, по той же причине, что у соседа: состав зависит от
+ * `worldReady`, то есть от палитры, и застыть в снимке не вправе.
+ */
+export function spikeWorlds(): string[] {
+  return Object.keys(WORLDS).filter((w) => worldReady(w))
+}
+
+/**
+ * Мир по умолчанию, посев и ступень замера.
+ *
+ * Раньше здесь стоял `WORLD = 'city'` — мира с таким именем в `WORLDS` нет
+ * вовсе, и `zonesOf` молча откатывался на зоны холмов: рисовались холмы, а в
+ * журнал каждого забега шло имя мира, которого не существует. Теперь
+ * умолчание берётся из того же списка, что и кнопка пульта.
+ */
+export const DEFAULT_WORLD = spikeWorlds()[0]
 export const SEED = 1
 export const STEP = 1
 /** Длина забега и банк призов — те же, что у перебора бюджета. */
@@ -314,7 +370,7 @@ const FULL_BANK = 1200
  * `node` и тянет `node:fs`, в браузер его не внести. Поэтому совпадение
  * сторожит тест (`tests/spike.test.ts`), а не договорённость.
  */
-export function makeRun(seed: number = SEED, world: string = WORLD, step: number = STEP) {
+export function makeRun(seed: number = SEED, world: string = DEFAULT_WORLD, step: number = STEP) {
   let s = seed
   const rng = () => {
     s = (s * 1103515245 + 12345) & 0x7fffffff
@@ -343,7 +399,7 @@ export function makeRun(seed: number = SEED, world: string = WORLD, step: number
  * разница чисел означала бы заодно разницу содержимого кадра. Поза в спайке
  * нагружает конвейер — управление приезжает с настоящими экранами.
  */
-export function stateAt(run: ReturnType<typeof makeRun>, t: number): RunState {
+export function stateAt(run: ReturnType<typeof makeRun>, t: number, world: string): RunState {
   return {
     /* Приведения, а не разметка: генераторы живут в `src/core/*.js`
        (`checkJs: false`), и типов у них нет ни одного. Описать их здесь
@@ -358,13 +414,13 @@ export function stateAt(run: ReturnType<typeof makeRun>, t: number): RunState {
     v: 0,
     travel: t * run.tune.speed,
     elapsed: t,
-    zone: zoneAt(t, DURATION_S, WORLD),
+    zone: zoneAt(t, DURATION_S, world),
     prizes: run.prizes as unknown as Record<string, boolean>,
     finishIn: DURATION_S - t,
     safe: true,
     pulse: 0,
     dim: 0,
-    world: WORLD,
+    world,
     durationS: DURATION_S,
     step: STEP,
   }
@@ -387,7 +443,12 @@ type Live = {
  * Возвращает способ остановиться — без него переключение прогонов оставляло
  * бы прошлый работать, и «both» мерился бы поверх «scene».
  */
-async function runLive(run: Run, canvas: HTMLCanvasElement, say: (s: string) => void): Promise<Live> {
+async function runLive(
+  run: Run,
+  world: string,
+  canvas: HTMLCanvasElement,
+  say: (s: string) => void,
+): Promise<Live> {
   let renderer: Renderer | null = null
 
   // ── картинка ──
@@ -427,7 +488,7 @@ async function runLive(run: Run, canvas: HTMLCanvasElement, say: (s: string) => 
      по-прежнему идут (`gap95` у «pose/gpu» — такое же число таблицы, как у
      остальных), и ветка «а тут расписания нет» была бы вторым путём, по
      которому мерится то же самое. */
-  const level = makeRun()
+  const level = makeRun(SEED, world, STEP)
   const t0 = performance.now()
   let lastWindow = t0
 
@@ -435,7 +496,7 @@ async function runLive(run: Run, canvas: HTMLCanvasElement, say: (s: string) => 
      несостоявшийся прогон (камера не открылась, делегат не поднялся) всё
      равно оставлял бы запись, и повтор дал бы в таблице разбора пятый
      забег с нулём окон — рядом с четырьмя настоящими. */
-  noteRunStart(run)
+  noteRunStart(run, world)
   const health = makeHealth(() => renderer?.stats() ?? NO_DRAW, t0)
 
   const frame = (now: number): void => {
@@ -443,7 +504,7 @@ async function runLive(run: Run, canvas: HTMLCanvasElement, say: (s: string) => 
     health.frame(now)
     if (renderer) {
       const drawStart = performance.now()
-      renderer.draw(composeScene(stateAt(level, (now - t0) / 1000)))
+      renderer.draw(composeScene(stateAt(level, (now - t0) / 1000, world)))
       health.drew(performance.now() - drawStart)
     }
     if (now - lastWindow > 1000) {
@@ -534,17 +595,114 @@ export function keepAwake(
   })
 }
 
+// ──────────────────────────── пульт замера ────────────────────────────
+
+/** Три экрана пульта: калитка, выбор прогона, сам прогон. */
+export type PultScreen = 'gate' | 'pult' | 'run'
+
+export type PultDeps = {
+  /** Запустить прогон. В странице — `switchTo`, в проверке — список вызовов. */
+  play: (run: Run, world: string) => void
+  /** Удержание экрана. Просится ТОЛЬКО с калитки: нужен живой жест. */
+  keepAwake?: () => void
+  /** Полный экран. Там же и по той же причине. */
+  fullscreen?: () => void
+}
+
+export type Pult = {
+  readonly screen: PultScreen
+  readonly world: string
+  /** Имена прогонов, которые в этой сессии уже шли. */
+  readonly done: readonly string[]
+  /** Касание калитки: отсюда и только отсюда просятся экранные права. */
+  start(): void
+  pick(run: Run): void
+  toMenu(): void
+  nextWorld(): void
+}
+
+/**
+ * Пульт: что на экране, какой мир выбран и какие прогоны уже сняты.
+ *
+ * Без DOM намеренно — ровно затем, чтобы это проверялось в `node`. Страница
+ * ниже только рисует это состояние и зовёт его же методы.
+ *
+ * Зачем калитка. Полный экран и `wakeLock` браузер отдаёт только по живому
+ * жесту. Пока страница просила их при загрузке, отказ приходил молча, и
+ * обнаружился бы погасшим экраном посреди прогона — то есть отравленным
+ * `gap95` ровно там, где снимается приговор.
+ *
+ * Зачем отметка пройденных. Четыре прогона снимаются в ОДНОЙ сессии
+ * (разброс устройства ±8 fps живёт между сессиями), и пропущенный
+ * обнаруживается уже на разборе, когда телефон сложен и ребёнок ушёл.
+ */
+export function makePult(deps: PultDeps): Pult {
+  const worlds = spikeWorlds()
+  let screen: PultScreen = 'gate'
+  let at = 0
+  const done: string[] = []
+
+  return {
+    get screen(): PultScreen {
+      return screen
+    },
+    get world(): string {
+      return worlds[at]
+    },
+    get done(): readonly string[] {
+      return done
+    },
+
+    start(): void {
+      screen = 'pult'
+      deps.fullscreen?.()
+      deps.keepAwake?.()
+    },
+
+    pick(run: Run): void {
+      const name = runName(run)
+      /* Повтор прогона второй отметки не заводит: прогонов по-прежнему
+         четыре, и «снято три из четырёх» обязано читаться с экрана. */
+      if (!done.includes(name)) done.push(name)
+      screen = 'run'
+      deps.play(run, worlds[at])
+    },
+
+    toMenu(): void {
+      screen = 'pult'
+    },
+
+    nextWorld(): void {
+      at = (at + 1) % worlds.length
+    },
+  }
+}
+
 /**
  * Запуск страницы. Зовётся из `spike.html`, а не сама: модуль обязан
  * импортироваться в `node` (его проверяет прогон), а там страницы нет.
+ *
+ * Здесь только рисование состояния пульта и подписка на его методы: что
+ * показано, какой мир и какие прогоны сняты, решает `makePult`, который
+ * проверяется в `node`. Разделение нужно затем, чтобы правило «права
+ * просятся только с калитки» сторожилось тестом, а не чтением кода.
  */
 export function boot(): void {
   log.watchLifecycle()
 
-  const canvas = document.getElementById('stage') as HTMLCanvasElement
-  const status = document.getElementById('status') as HTMLElement
-  const buttons = document.getElementById('runs') as HTMLElement
-  const warnEl = document.getElementById('warn') as HTMLElement
+  const byId = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T
+  const gateEl = byId('gate')
+  const pultEl = byId('pult')
+  const runEl = byId('run')
+  const canvas = byId<HTMLCanvasElement>('stage')
+  const status = byId('status')
+  const warnEl = byId('warn')
+  const tilesEl = byId('tiles')
+  const worldEl = byId<HTMLButtonElement>('world')
+  const saveEl = byId<HTMLButtonElement>('save')
+  const pultMsg = byId('pultMsg')
+  const runLabel = byId('runLabel')
+
   const say = (s: string): void => {
     status.textContent = s
   }
@@ -554,21 +712,22 @@ export function boot(): void {
     warnEl.textContent = text ?? ''
     warnEl.hidden = !text
   }
-  /* После `warn`, а не до: блокировка умеет не дасться, и сказать об этом
-     надо на экран, которого до этой строки ещё нет. */
-  keepAwake(warn)
 
   let current: Live | null = null
   let busy = false
 
-  async function switchTo(run: Run): Promise<void> {
+  async function stop(): Promise<void> {
+    await current?.stop()
+    current = null
+  }
+
+  async function switchTo(run: Run, world: string): Promise<void> {
     if (busy) return
     busy = true
     try {
-      await current?.stop()
-      current = null
+      await stop()
       say(`${runName(run)}: запуск…`)
-      current = await runLive(run, canvas, say)
+      current = await runLive(run, world, canvas, say)
     } catch (e) {
       log.event('spike.fail', { run: runName(run), message: String((e as Error)?.message ?? e) })
       say(`${runName(run)} не запустился: ${String((e as Error)?.message ?? e)}`)
@@ -577,31 +736,94 @@ export function boot(): void {
     }
   }
 
-  /* Четыре кнопки — те же четыре прогона, что и четыре адреса. Кнопки нужны,
-     чтобы все четыре легли в ОДНУ сессию журнала: разброс устройства живёт
-     между сессиями. */
-  for (const search of SPIKE_RUNS) {
-    const run = runFromQuery(search)
-    const b = document.createElement('button')
-    b.textContent = runName(run)
-    b.onclick = () => void switchTo(run)
-    buttons.append(b)
+  const pult = makePult({
+    play: (run, world) => {
+      /* Сначала показать экран прогона, потом запускать. Канва на скрытом
+         экране имеет нулевой размер, и буфер отрисовки завёлся бы нулевым —
+         то есть числа были бы сняты с картинки, которой нет. */
+      runLabel.textContent = tileText(run)
+      paint()
+      void switchTo(run, world)
+    },
+    keepAwake: () => keepAwake(warn),
+    fullscreen: () => {
+      /* Отказ в полном экране замер не отменяет: он портит только поля по
+         краям. Молчать о нём тоже нельзя — шторка сверху крадёт кадры. */
+      void document.documentElement.requestFullscreen?.().catch((e: Error) => {
+        log.event('fullscreen.fail', { message: String(e?.message ?? e) })
+      })
+    },
+  })
+
+  const tileText = (run: Run): string => {
+    const t = runTile(run)
+    return `${t.no} · ${t.title} · ${t.sub}`
   }
 
-  const save = document.createElement('button')
-  save.textContent = 'выгрузить журнал'
-  save.onclick = async () => {
-    await current?.stop()
-    current = null
-    const r = await log.save()
-    say(`журнал: ${r.name}, ${Math.round(r.bytes / 1024)} КБ, сессий ${r.sessions}`)
+  /* Четыре плитки — те же четыре прогона, что и четыре адреса: список один
+     (`SPIKE_RUNS`), и «поменяли адрес, а кнопка осталась прежней»
+     невозможно. */
+  const marks = new Map<string, HTMLElement>()
+  for (const search of SPIKE_RUNS) {
+    const run = runFromQuery(search)
+    const t = runTile(run)
+    const b = document.createElement('button')
+    b.className = 'tile'
+    b.innerHTML = `<b>${t.no} · ${t.title}</b><span>${t.sub}</span><i hidden>снят</i>`
+    b.onclick = () => pult.pick(run)
+    tilesEl.append(b)
+    marks.set(runName(run), b)
   }
-  buttons.append(save)
+
+  function paint(): void {
+    gateEl.hidden = pult.screen !== 'gate'
+    pultEl.hidden = pult.screen !== 'pult'
+    runEl.hidden = pult.screen !== 'run'
+    worldEl.textContent = `Мир: ${(WORLDS as Record<string, { name: string }>)[pult.world].name}`
+    for (const [name, b] of marks) {
+      const played = pult.done.includes(name)
+      b.classList.toggle('played', played)
+      ;(b.querySelector('i') as HTMLElement).hidden = !played
+    }
+  }
+
+  byId<HTMLButtonElement>('gateStart').onclick = () => {
+    pult.start()
+    paint()
+    /* Адрес по-прежнему задаёт НАЧАЛЬНЫЙ прогон — тем же разбором и с тем же
+       громким отказом на незнакомом значении. Без параметров пульт просто
+       остаётся на экране выбора: открыть страницу и ничего не запустить
+       теперь можно, и это отдельно полезно — журнал выгружают оттуда же. */
+    if (!location.search) return
+    try {
+      pult.pick(runFromQuery(location.search))
+    } catch (e) {
+      pultMsg.textContent = String((e as Error)?.message ?? e)
+    }
+  }
+
+  worldEl.onclick = () => {
+    pult.nextWorld()
+    paint()
+  }
+
+  byId<HTMLButtonElement>('back').onclick = () => {
+    void stop().then(() => {
+      pult.toMenu()
+      paint()
+    })
+  }
+
+  saveEl.onclick = async () => {
+    await stop()
+    const r = await log.save()
+    pultMsg.textContent = `журнал: ${r.name}, ${Math.round(r.bytes / 1024)} КБ, сессий ${r.sessions}`
+  }
 
   /* Поворот телефона посреди замера обязан доехать до буфера: иначе кадры
      продолжают рисоваться в прежний размер, и числа второй половины прогона
      сняты с другой картинки, чем числа первой. */
   addEventListener('resize', () => current?.resize())
 
-  void switchTo(runFromQuery(location.search))
+  paint()
 }
