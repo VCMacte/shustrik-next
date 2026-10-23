@@ -16,6 +16,8 @@ import * as THREE from 'three'
 import { VIEW } from '../../core/config.js'
 import { CROUCH_PITCH_GAIN, DRAW_FAR_M } from '../types'
 import type { FrameScene } from '../types'
+import { bufferFor } from '../buffer'
+import type { BufferPolicy, BufferSize } from '../buffer'
 import { cameraX } from '../numbers'
 import { backdropPlacements } from '../estimate'
 import {
@@ -35,6 +37,19 @@ export interface Renderer {
   resize(w: number, h: number, dpr: number): void
   draw(scene: FrameScene): void
   stats(): { calls: number; verts: number }
+  /**
+   * В какой буфер рисуется кадр.
+   *
+   * Отдельно от `stats()`, а не пятым полем в нём, по причине механической:
+   * `stats()` сверяется с `estimate` ЦЕЛИКОМ (`toEqual`), и лишнее поле
+   * сломало бы сверку, которая держит главный инвариант проекта. Но и
+   * молчать нельзя: без этого числа «инференс упал на 20 мс» в журнале
+   * нечем отличить от «телефон повернули, и буфер стал другим».
+   *
+   * В `Renderer`, а не в `ThreeRenderer`: внутреннее разрешение есть у обоих
+   * способов вывода, и спрайтовый обязан отвечать на тот же вопрос.
+   */
+  buffer(): BufferSize
   dispose(): void
 }
 
@@ -53,37 +68,15 @@ export interface ThreeRenderer extends Renderer {
   root(): THREE.Group
 }
 
-/**
- * Внутреннее разрешение: рисуем в 0.7 от плотности экрана.
- *
- * ЧИСЛО ВЫБРАНО НАМИ И НИЧЕМ ПОКА НЕ ОБОСНОВАНО, кроме здравого смысла.
- * Говорится это прямо, потому что первая версия этого комментария выводила
- * 0.7 из старого вывода, и вывод был натянут: `VIEW.width`/`VIEW.height`
- * фиксируют буфер 1280×720 и игнорируют DPR вовсе («Miracast всё равно
- * пережимает в 720p, рисовать выше — чистый нагрев на GPU, который уже
- * делят распознавание и кодировщик», `src/core/config.js:377`), а
- * `min(dpr, 2) × 0.7` никакого потолка в 720p НЕ ставит: на плотном экране
- * буфер уедет выше. Это не «та же мысль, выраженная долей» — это другая
- * мысль, и притворяться иначе нельзя.
- *
- * В спеке этого числа тоже нет: план и бриф этапа говорят «0.7 из спеки», но
- * в тексте `docs/superpowers/specs/2026-10-21-architecture.md` его нет ни
- * разу — проверено поиском.
- *
- * Чем оно станет: ЗАМЕРОМ. Следующий этап — спайк (`gap95` ≤ 40 мс при позах
- * ≥ 10 Гц), и внутреннее разрешение — первая ручка, которой этот порог
- * берут. Либо замер подтвердит долю, либо на её место встанет абсолютный
- * потолок по числу пикселей буфера, как у старого вывода. До замера менять
- * его по вкусу нельзя — ровно так потолки и уползают.
+/*
+ * Внутреннее разрешение переехало в `../buffer`: по нему теперь СУДЯТ —
+ * журнал спайка пишет пиксели буфера четвёртым числом бюджета, — а значит
+ * считаться оно обязано там, где есть `node` и нет GL-контекста. Имена
+ * вывозятся отсюда дальше: `RENDER_SCALE` снаружи просят как число
+ * трёхмерного вывода, и прятать его за новым путём импорта значило бы
+ * сломать читателя на ровном месте.
  */
-export const RENDER_SCALE = 0.7
-
-/**
- * Потолок плотности экрана. Выше двух множить незачем: 0.7 от тройной
- * плотности — это втрое больше пикселей ради картинки, которую Miracast
- * всё равно пережмёт в 720p.
- */
-export const MAX_DPR = 2
+export { RENDER_SCALE, MAX_DPR, SMALL_BUFFER_W, SMALL_BUFFER_H } from '../buffer'
 
 /**
  * Высота глаз ребёнка, метры. Число СТАРОГО вывода (`view.js:28`, `const EYE
@@ -171,6 +164,18 @@ export type ThreeRendererDeps = {
   makeKtx2?: () => Ktx2Like | null | Promise<Ktx2Like | null>
   assets?: LoadedAssets
   loadAssets?: (ktx2: Ktx2Like | null) => Promise<LoadedAssets>
+  /**
+   * Внутреннее разрешение прогона. Умолчание `full` — как рисовалось всегда.
+   *
+   * Единственное поле здесь, которое не подмена для прогона, а настоящая
+   * настройка, и стоит оно ЗДЕСЬ, при сборке, а не аргументом `resize`
+   * нарочно. `resize` зовётся ещё и на поворот телефона, посреди замера;
+   * забытый там аргумент вернул бы прогон к полному буферу молча, и числа
+   * второй половины прогона были бы сняты с другой картинки, чем первой —
+   * ровно та беда, от которой подписка на `resize` и поставлена. Выбранное
+   * при сборке забыть нельзя: вывод на прогон заводится свой.
+   */
+  buffer?: BufferPolicy
 }
 
 /**
@@ -246,6 +251,13 @@ export async function makeThreeRenderer(
   if (ktx2) ktx2.detectSupport(gl)
 
   const assets = deps.assets ?? (await (deps.loadAssets ?? defaultLoadAssets)(ktx2))
+
+  const policy: BufferPolicy = deps.buffer ?? 'full'
+  /* До первого `resize` буфер неизвестен, и ноль здесь — не «неизвестно», а
+     правда: рисовать ещё некуда. Врать единицей нельзя — журнал прогона,
+     который упал до первого кадра, записал бы пиксели картинки, которой
+     никогда не было. */
+  let buffered: BufferSize = { ratio: 0, w: 0, h: 0, px: 0 }
 
   const scene = new THREE.Scene()
   /* Света в сцене нет ни одного источника: он ЗАПЕЧЁН в текстуры (спека,
@@ -395,11 +407,19 @@ export async function makeThreeRenderer(
 
   return {
     resize(w: number, h: number, dpr: number): void {
-      gl.setPixelRatio(Math.min(dpr, MAX_DPR) * RENDER_SCALE)
+      /* Множитель считает `bufferFor`, а не эта строка: тем же вызовом
+         журнал получает пиксели кадра, и расхождение между нарисованным и
+         записанным становится невозможным, а не маловероятным. */
+      buffered = bufferFor(policy, w, h, dpr)
+      gl.setPixelRatio(buffered.ratio)
       /* `updateStyle = false`: размер холста НА СТРАНИЦЕ — дело оболочки,
          вывод распоряжается только буфером. */
       gl.setSize(w, h, false)
       applyFov(w / h)
+    },
+
+    buffer(): BufferSize {
+      return buffered
     },
 
     draw(frame: FrameScene): void {
