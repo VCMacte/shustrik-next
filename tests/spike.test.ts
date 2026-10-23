@@ -12,9 +12,11 @@
  * выгрузит с телефона. Подделанный журнал в этом тесте сделал бы его пустым:
  * он проверял бы согласие теста с самим собой.
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { beforeAll, expect, test } from 'vitest'
+
+import { bufferFor } from '../src/render/buffer'
 
 const ROOT = join(__dirname, '..')
 
@@ -248,7 +250,7 @@ test('разбор run-game читает наш журнал', async () => {
   /* Окна здоровья пишет НАСТОЯЩИЙ накопитель страницы спайка: имена полей и
      способ счёта живут там, а не здесь. Кадры ровные по 33 мс — значит
      `gap95` каждого окна равен 33, и медиана окон тоже 33. */
-  const health = spike.makeHealth(() => ({ calls: 120, verts: 90_000 }), 0)
+  const health = spike.makeHealth(() => ({ calls: 120, verts: 90_000, bufPx: 1280 * 720 }), 0)
   let now = 0
   for (let window = 0; window < 3; window++) {
     for (let i = 0; i < 30; i++) {
@@ -278,7 +280,7 @@ test('разбор run-game читает наш журнал', async () => {
 })
 
 test('живой счёт кадра едет в журнал рядом с ровностью', async () => {
-  const health = spike.makeHealth(() => ({ calls: 121, verts: 91_000 }), 0)
+  const health = spike.makeHealth(() => ({ calls: 121, verts: 91_000, bufPx: 1280 * 720 }), 0)
   let now = 0
   for (let i = 0; i < 30; i++) {
     now += 33
@@ -288,12 +290,50 @@ test('живой счёт кадра едет в журнал рядом с ро
 
   const dump = await exportedDump()
   const windows = dump.sessions[0].log.filter((e: any) => e.type === 'health')
-  expect(windows.at(-1)).toMatchObject({ calls: 121, verts: 91_000 })
+  expect(windows.at(-1)).toMatchObject({ calls: 121, verts: 91_000, bufPx: 921_600 })
   // И разбор при этом не спотыкается о незнакомые поля.
   expect(report(dump.sessions[0]).perf.gap.med).toBe(33)
 })
 
-test('четыре прогона различимы в журнале', async () => {
+/**
+ * Пиксели буфера — четвёртое число бюджета, и в журнал они едут из ВЫВОДА.
+ *
+ * Прошла бы вхолостую? Проверка одного `bufPx` в окне — ДА: `makeHealth`
+ * просто кладёт то, что ему дали. Поэтому здесь проверяется ДРУГОЕ — что
+ * число берётся у `bufferFor`, то есть у того же места, которым выставлен
+ * `setPixelRatio`. Своя арифметика в журнале (скажем, `w * h * dpr * dpr`)
+ * дала бы правдоподобное, но другое число, и малый прогон оказался бы
+ * записан с буфером, в который не рисовался.
+ */
+test('пиксели буфера в журнале — те же, что у вывода', async () => {
+  /* Размер окна — настоящий, телефона спайка: 873×393 при `dpr` 2.75
+     (Redmi Note 11 Pro 5G горизонтально). Круглые 1280×720 дали бы круглые
+     числа и спрятали бы главное — что потолок связывает ШИРИНА, а не
+     высота, потому что окно шире 16:9. */
+  const small = bufferFor('small', 873, 393, 2.75)
+  const health = spike.makeHealth(() => ({ calls: 110, verts: 90_000, bufPx: small.px }), 0)
+  let now = 0
+  for (let i = 0; i < 30; i++) {
+    now += 33
+    health.frame(now)
+  }
+  health.flush(now, 'both/cpu/small')
+
+  const dump = await exportedDump()
+  const windows = dump.sessions[0].log.filter((e: any) => e.type === 'health')
+  /* 480×216, а не 480×270: потолок связан шириной. Литералом — иначе
+     проверка сверяла бы `bufferFor` сама с собой, и потолок, уехавший до
+     960×540, остался бы зелёным. */
+  expect(windows.at(-1)).toMatchObject({ stage: 'both/cpu/small', bufPx: 480 * 216 })
+  /* Ожидаемый размер эффекта записан ЗАРАНЕЕ, как и положено потолку: во
+     столько раз малый прогон обязан облегчить проход отрисовки на телефоне
+     спайка. Разъехалось — значит либо потолок правили задним числом, либо
+     доля `RENDER_SCALE` уехала, и в обоих случаях замер сравнивает не то,
+     что записано в спеке. */
+  expect(bufferFor('full', 873, 393, 2.75).px / (480 * 216)).toBeCloseTo(6.48, 2)
+})
+
+test('все прогоны различимы в журнале', async () => {
   /* Прогоняется ТОТ ЖЕ список адресов, из которого страница строит кнопки
      (`SPIKE_RUNS`), — иначе «поменяли строку в boot(), всё осталось
      зелёным» было бы возможно. Самосверки здесь не возникает: сверяются
@@ -303,17 +343,49 @@ test('четыре прогона различимы в журнале', async (
   }
 
   const dump = await exportedDump()
-  const runs = dump.sessions[0].log
-    .filter((e: any) => e.type === 'run.start')
-    .map((e: any) => `${e.what}/${e.delegate}`)
-  expect(runs).toEqual(['scene/-', 'pose/gpu', 'both/gpu', 'both/cpu'])
+  const starts = dump.sessions[0].log.filter((e: any) => e.type === 'run.start')
+
+  /* Имя собирается из ТРЁХ полей журнала, а не из `runName`. Разница
+     решающая: с двумя полями тройка малого буфера легла бы в журнал
+     неотличимо от полной (`both/cpu` дважды), и разбор сложил бы в одну
+     строку два забега с разной картинкой — то есть ответ на единственный
+     оставшийся вопрос спайка был бы потерян молча. */
+  expect(starts.map((e: any) => `${e.what}/${e.delegate}/${e.buffer}`)).toEqual([
+    'scene/-/full',
+    'pose/gpu/full',
+    'both/gpu/full',
+    'both/cpu/full',
+    'scene/-/small',
+    'both/gpu/small',
+    'both/cpu/small',
+  ])
+})
+
+/**
+ * Четыре имени базовой линии не переименованы.
+ *
+ * Прошла бы вхолостую? НЕТ, и это найдено не рассуждением: первая написанная
+ * версия `runName` приписывала буфер ВСЕГДА, и четвёрка превращалась в
+ * `scene/-/full`, `both/cpu/full`. Выглядит аккуратнее, а стоит замера:
+ * разбор `run-game` сопоставляет забеги ПО ИМЕНИ, и сравнивать числа с
+ * базовой линией 21 октября стало бы не с чем.
+ */
+test('полный буфер не переименовывает прогоны базовой линии', () => {
+  expect(spike.runName({ what: 'scene', delegate: null, buffer: 'full' })).toBe('scene/-')
+  expect(spike.runName({ what: 'both', delegate: 'cpu', buffer: 'full' })).toBe('both/cpu')
+  expect(spike.runName({ what: 'both', delegate: 'cpu', buffer: 'small' })).toBe('both/cpu/small')
 })
 
 test('адрес без параметров даёт полный прогон на видеоядре', () => {
-  expect(spike.runFromQuery('')).toEqual({ what: 'both', delegate: 'gpu' })
+  expect(spike.runFromQuery('')).toEqual({ what: 'both', delegate: 'gpu', buffer: 'full' })
   // Мусор не должен молча превращаться в прогон, которого человек не просил.
   expect(() => spike.runFromQuery('?what=всё')).toThrow()
   expect(() => spike.runFromQuery('?what=both&delegate=npu')).toThrow()
+  /* И буфер тоже. `?buffer=480` выглядит осмысленнее всего остального и
+     поэтому опаснее: молча став полным прогоном, он положил бы в таблицу
+     строку малого буфера, снятую полным. */
+  expect(() => spike.runFromQuery('?buffer=480')).toThrow()
+  expect(spike.runFromQuery('?buffer=small').buffer).toBe('small')
 })
 
 test('пути MediaPipe перекрыты сборкой, а не копией config', async () => {
@@ -355,7 +427,7 @@ test('файлы, на которые указывают пути, вправд�
 
 test('воркер позы получает пути сборки, а не VENDOR из копии', async () => {
   const { VENDOR } = await import('../src/core/config.js')
-  const init = spike.poseInit({ what: 'both', delegate: 'cpu' }, 'https://phone.local/shustrik/')
+  const init = spike.poseInit({ what: 'both', delegate: 'cpu', buffer: 'full' }, 'https://phone.local/shustrik/')
 
   expect(init.type).toBe('init')
   expect(init.delegate).toBe('CPU')
@@ -366,15 +438,22 @@ test('воркер позы получает пути сборки, а не VEND
   // Путь до упаковщика точек обязан вести в копию логики, а не в чужую.
   expect(init.packUrl).toMatch(/core\/pose\.pack\.js$/)
 
-  expect(spike.poseInit({ what: 'pose', delegate: 'gpu' }, 'https://x/').delegate).toBe('GPU')
+  expect(spike.poseInit({ what: 'pose', delegate: 'gpu', buffer: 'full' }, 'https://x/').delegate).toBe('GPU')
 })
 
-test('кнопки страницы ведут ровно в четыре прогона замера', () => {
+test('кнопки страницы ведут ровно в прогоны замера', () => {
   /* Имена — литералом, адреса — из владельца. Разъехались бы они молча:
      `?what=pose` без делегата дал бы `pose/gpu` и выглядел бы правильно, а
      строка таблицы «поза на процессоре» исчезла бы из замера. */
-  expect(spike.SPIKE_RUNS.map((s) => spike.runName(spike.runFromQuery(s))))
-    .toEqual(['scene/-', 'pose/gpu', 'both/gpu', 'both/cpu'])
+  expect(spike.SPIKE_RUNS.map((s) => spike.runName(spike.runFromQuery(s)))).toEqual([
+    'scene/-',
+    'pose/gpu',
+    'both/gpu',
+    'both/cpu',
+    'scene/-/small',
+    'both/gpu/small',
+    'both/cpu/small',
+  ])
 })
 
 test('первое окно считается от начала прогона, а не от загрузки страницы', () => {
@@ -383,7 +462,7 @@ test('первое окно считается от начала прогона,
      сто секунд, и `fps`/`hz` занизились бы в разы — а разбор берёт у
      прогона именно `min`, то есть «худшее» стало бы мусором. */
   const t0 = 100_000
-  const health = spike.makeHealth(() => ({ calls: 7, verts: 7 }), t0)
+  const health = spike.makeHealth(() => ({ calls: 7, verts: 7, bufPx: 7 }), t0)
   const window = (from: number): Record<string, number | string> => {
     let now = from
     for (let i = 0; i < 30; i++) {
@@ -474,13 +553,22 @@ test('плитки пульта называют прогоны словами, 
      прогон пришлось бы искать глазами. */
   const tiles = spike.SPIKE_RUNS.map((s) => spike.runTile(spike.runFromQuery(s)))
 
-  expect(tiles.map((t) => t.no)).toEqual([1, 2, 3, 4])
+  expect(tiles.map((t) => t.no)).toEqual([1, 2, 3, 4, 5, 6, 7])
   expect(tiles.map((t) => `${t.title} · ${t.sub}`)).toEqual([
     'Картинка · без позы',
     'Поза · видеоядро, без картинки',
     'Всё вместе · видеоядро',
     'Всё вместе · процессор',
+    'Картинка · без позы, малый буфер',
+    'Всё вместе · видеоядро, малый буфер',
+    'Всё вместе · процессор, малый буфер',
   ])
+
+  /* Подписи ВСЕХ плиток различны. Проверяется не для красоты: пометка
+     буфера — единственное, чем парные прогоны отличаются на кнопке, и
+     потеряйся она в одной из трёх — человек у штатива снял бы шестой прогон
+     вместо третьего, а узнал бы об этом на разборе. */
+  expect(new Set(tiles.map((t) => `${t.title} · ${t.sub}`)).size).toBe(tiles.length)
 
   /* Два последних прогона — вся суть замера: один и тот же кадр на
      видеоядре и на процессоре. Совпади их подписи — человек записал бы
@@ -571,4 +659,95 @@ test('выбранный мир доезжает до журнала', async () 
   const starts = dump.sessions.flatMap((s: any) => s.log).filter((e: any) => e.type === 'run.start')
   expect(starts).toHaveLength(1)
   expect(starts[0].world).toBe('ice')
+})
+
+// ──────────────────────── малый буфер: стыки ────────────────────────
+
+/**
+ * Имя класса `pixel` совпадает у страницы и у оболочки.
+ *
+ * Два литерала в разных файлах: `canvas.classList.toggle('pixel', …)` в
+ * `spike.ts` и `#stage.pixel { image-rendering: pixelated }` в `spike.html`.
+ * Опечатка в любом из двух НЕ ломает ничего видимого: прогон идёт, числа
+ * пишутся, буфер действительно мал — и только растяжение оказывается
+ * сглаженным. То есть замер состоится и будет снят не с той картинки,
+ * которую мерили. Ровно тот род тихой поломки, ради которого здесь уже стоят
+ * проверки путей MediaPipe по тексту файлов.
+ *
+ * Прошла бы вхолостую? НЕТ: переименуй класс в одном месте — падает.
+ */
+test('класс пиксельного растяжения назван одинаково в странице и в оболочке', () => {
+  const page = readFileSync(join(ROOT, 'spike.html'), 'utf8')
+  const shell = readFileSync(join(ROOT, 'src/shell/spike.ts'), 'utf8')
+
+  expect(page).toMatch(/#stage\.pixel\s*\{[^}]*image-rendering:\s*pixelated/)
+  expect(shell).toContain("classList.toggle('pixel'")
+})
+
+/**
+ * Разбор `run-game` переваривает сессию с малым буфером.
+ *
+ * Требование записано в спеке: журнал обязан читаться `log-report.mjs` БЕЗ
+ * правок разборщика, иначе числа спайка не сопоставятся с базовой линией.
+ * Прежние проверки звали разбор только со `stage: 'both'` — то есть ни одна
+ * из них не видела ни трёхсегментного имени, ни поля `buffer` в `run.start`,
+ * ни `bufPx` в окне.
+ *
+ * Чего здесь НЕ проверяется и почему. Разбор приписывает окна забегу ПО
+ * ВРЕМЕНИ (`log-report.mjs`: окна между `run.start` и следующим), а в этом
+ * журнале все события пишутся в одну миллисекунду — поддельный браузер
+ * работает мгновенно. Поэтому числа ПО ЗАБЕГАМ здесь вышли бы смешанными
+ * (проверено: инференс первого забега — 98, то есть медиана обоих), и
+ * проверять их значило бы закрепить артефакт стенда. На телефоне прогоны
+ * разделены минутами, и там приписка верна. Проверяется то, что от времени
+ * не зависит: разбор не споткнулся, забега два, сессионные числа на месте —
+ * и сырые поля, по которым пару прогонов сводят руками.
+ */
+test('разбор читает сессию, в которой есть прогон малого буфера', async () => {
+  await log.clear()
+
+  const windows = (stage: string, inferMs: number, bufPx: number) => {
+    const health = spike.makeHealth(() => ({ calls: 110, verts: 90_000, bufPx }), 0)
+    let now = 0
+    for (let w = 0; w < 2; w++) {
+      for (let i = 0; i < 30; i++) {
+        now += 33
+        health.frame(now)
+        health.pose({ inferMs, dropped: 0, lm: new Float32Array(132) })
+      }
+      health.flush(now, stage)
+    }
+  }
+
+  spike.noteRunStart(spike.runFromQuery('?what=both&delegate=cpu'), 'hills')
+  windows('both/cpu', 109, bufferFor('full', 873, 393, 2.75).px)
+  spike.noteRunStart(spike.runFromQuery('?what=both&delegate=cpu&buffer=small'), 'hills')
+  windows('both/cpu/small', 87, bufferFor('small', 873, 393, 2.75).px)
+
+  const dump = await exportedDump()
+  const rep = report(dump.sessions[0])
+
+  /* Забега два, а не один и не три: незнакомое поле в `run.start` не сбило
+     разборщику разбиение на забеги. */
+  expect(rep.runs).toHaveLength(2)
+  // И сессионные числа посчитаны, а не обнулены незнакомыми полями.
+  expect(rep.perf.windows).toBe(4)
+  expect(rep.perf.gap.med).toBe(33)
+
+  /* А вот ЧЕМ прогоны отличались, печатная сводка не знает вовсе: `stage` в
+     разборщике не встречается ни разу, и у обоих забегов здесь один делегат
+     и один мир. Поэтому буфер сводится по СЫРОМУ журналу, и порядок этого
+     записан в спеке рядом с приговором. Эти две строки — проверка того, что
+     записанный там порядок выполним. */
+  const starts = dump.sessions[0].log.filter((e: any) => e.type === 'run.start')
+  expect(starts.map((e: any) => e.buffer)).toEqual(['full', 'small'])
+  const heals = dump.sessions[0].log.filter((e: any) => e.type === 'health')
+  /* Записей ДВЕ на четыре окна: `log.js` схлопывает одинаковые повторы в
+     одну запись со счётчиком (`_n`), и разбор умеет это разворачивать — выше
+     `perf.windows` равен четырём. Схлопывание и есть причина, по которой
+     `stage` обязан отличаться у пары прогонов: совпади имена, журнал сложил
+     бы окна полного и малого буфера в ОДНУ запись, и развести их не вышло бы
+     уже ничем. */
+  expect(heals.map((e: any) => e.stage)).toEqual(['both/cpu', 'both/cpu/small'])
+  expect(heals.at(-1)).toMatchObject({ bufPx: 480 * 216 })
 })
