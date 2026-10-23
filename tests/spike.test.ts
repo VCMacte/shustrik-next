@@ -12,7 +12,7 @@
  * выгрузит с телефона. Подделанный журнал в этом тесте сделал бы его пустым:
  * он проверял бы согласие теста с самим собой.
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { beforeAll, expect, test } from 'vitest'
 
@@ -659,4 +659,95 @@ test('выбранный мир доезжает до журнала', async () 
   const starts = dump.sessions.flatMap((s: any) => s.log).filter((e: any) => e.type === 'run.start')
   expect(starts).toHaveLength(1)
   expect(starts[0].world).toBe('ice')
+})
+
+// ──────────────────────── малый буфер: стыки ────────────────────────
+
+/**
+ * Имя класса `pixel` совпадает у страницы и у оболочки.
+ *
+ * Два литерала в разных файлах: `canvas.classList.toggle('pixel', …)` в
+ * `spike.ts` и `#stage.pixel { image-rendering: pixelated }` в `spike.html`.
+ * Опечатка в любом из двух НЕ ломает ничего видимого: прогон идёт, числа
+ * пишутся, буфер действительно мал — и только растяжение оказывается
+ * сглаженным. То есть замер состоится и будет снят не с той картинки,
+ * которую мерили. Ровно тот род тихой поломки, ради которого здесь уже стоят
+ * проверки путей MediaPipe по тексту файлов.
+ *
+ * Прошла бы вхолостую? НЕТ: переименуй класс в одном месте — падает.
+ */
+test('класс пиксельного растяжения назван одинаково в странице и в оболочке', () => {
+  const page = readFileSync(join(ROOT, 'spike.html'), 'utf8')
+  const shell = readFileSync(join(ROOT, 'src/shell/spike.ts'), 'utf8')
+
+  expect(page).toMatch(/#stage\.pixel\s*\{[^}]*image-rendering:\s*pixelated/)
+  expect(shell).toContain("classList.toggle('pixel'")
+})
+
+/**
+ * Разбор `run-game` переваривает сессию с малым буфером.
+ *
+ * Требование записано в спеке: журнал обязан читаться `log-report.mjs` БЕЗ
+ * правок разборщика, иначе числа спайка не сопоставятся с базовой линией.
+ * Прежние проверки звали разбор только со `stage: 'both'` — то есть ни одна
+ * из них не видела ни трёхсегментного имени, ни поля `buffer` в `run.start`,
+ * ни `bufPx` в окне.
+ *
+ * Чего здесь НЕ проверяется и почему. Разбор приписывает окна забегу ПО
+ * ВРЕМЕНИ (`log-report.mjs`: окна между `run.start` и следующим), а в этом
+ * журнале все события пишутся в одну миллисекунду — поддельный браузер
+ * работает мгновенно. Поэтому числа ПО ЗАБЕГАМ здесь вышли бы смешанными
+ * (проверено: инференс первого забега — 98, то есть медиана обоих), и
+ * проверять их значило бы закрепить артефакт стенда. На телефоне прогоны
+ * разделены минутами, и там приписка верна. Проверяется то, что от времени
+ * не зависит: разбор не споткнулся, забега два, сессионные числа на месте —
+ * и сырые поля, по которым пару прогонов сводят руками.
+ */
+test('разбор читает сессию, в которой есть прогон малого буфера', async () => {
+  await log.clear()
+
+  const windows = (stage: string, inferMs: number, bufPx: number) => {
+    const health = spike.makeHealth(() => ({ calls: 110, verts: 90_000, bufPx }), 0)
+    let now = 0
+    for (let w = 0; w < 2; w++) {
+      for (let i = 0; i < 30; i++) {
+        now += 33
+        health.frame(now)
+        health.pose({ inferMs, dropped: 0, lm: new Float32Array(132) })
+      }
+      health.flush(now, stage)
+    }
+  }
+
+  spike.noteRunStart(spike.runFromQuery('?what=both&delegate=cpu'), 'hills')
+  windows('both/cpu', 109, bufferFor('full', 873, 393, 2.75).px)
+  spike.noteRunStart(spike.runFromQuery('?what=both&delegate=cpu&buffer=small'), 'hills')
+  windows('both/cpu/small', 87, bufferFor('small', 873, 393, 2.75).px)
+
+  const dump = await exportedDump()
+  const rep = report(dump.sessions[0])
+
+  /* Забега два, а не один и не три: незнакомое поле в `run.start` не сбило
+     разборщику разбиение на забеги. */
+  expect(rep.runs).toHaveLength(2)
+  // И сессионные числа посчитаны, а не обнулены незнакомыми полями.
+  expect(rep.perf.windows).toBe(4)
+  expect(rep.perf.gap.med).toBe(33)
+
+  /* А вот ЧЕМ прогоны отличались, печатная сводка не знает вовсе: `stage` в
+     разборщике не встречается ни разу, и у обоих забегов здесь один делегат
+     и один мир. Поэтому буфер сводится по СЫРОМУ журналу, и порядок этого
+     записан в спеке рядом с приговором. Эти две строки — проверка того, что
+     записанный там порядок выполним. */
+  const starts = dump.sessions[0].log.filter((e: any) => e.type === 'run.start')
+  expect(starts.map((e: any) => e.buffer)).toEqual(['full', 'small'])
+  const heals = dump.sessions[0].log.filter((e: any) => e.type === 'health')
+  /* Записей ДВЕ на четыре окна: `log.js` схлопывает одинаковые повторы в
+     одну запись со счётчиком (`_n`), и разбор умеет это разворачивать — выше
+     `perf.windows` равен четырём. Схлопывание и есть причина, по которой
+     `stage` обязан отличаться у пары прогонов: совпади имена, журнал сложил
+     бы окна полного и малого буфера в ОДНУ запись, и развести их не вышло бы
+     уже ничем. */
+  expect(heals.map((e: any) => e.stage)).toEqual(['both/cpu', 'both/cpu/small'])
+  expect(heals.at(-1)).toMatchObject({ bufPx: 480 * 216 })
 })
